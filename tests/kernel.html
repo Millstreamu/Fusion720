@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kernel smoke test</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; background: #111; color: #ddd; padding: 16px; }
+    .ok { color: #5c5; } .bad { color: #e55; } pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Fusion720 kernel smoke test</h1>
+  <pre id="log">Loading…</pre>
+  <script type="module">
+    import { Kernel } from '../src/kernel/client.js';
+    const log = (s, cls = '') => { const el = document.getElementById('log'); el.innerHTML += `\n<span class="${cls}">${s}</span>`; };
+    const t0 = performance.now();
+    const k = new Kernel({
+      onProgress: (l, t) => { document.title = `Kernel ${Math.round((100 * l) / t)}%`; },
+      onFatal: (e) => log('FATAL ' + e, 'bad'),
+      onReady: () => log(`kernel ready in ${Math.round(performance.now() - t0)} ms`, 'ok'),
+    });
+    const sketch = { id: 's1', type: 'sketch', name: 'Sketch1', plane: { type: 'std', name: 'XY', offset: '0' }, entities: [
+      { id: 'r1', type: 'rect', x: '-30', y: '-20', w: 'w', h: '40' },
+      { id: 'c1', type: 'circle', cx: '0', cy: '0', d: '12' },
+      { id: 'p1', type: 'slot', x1: '-20', y1: '10', x2: '-10', y2: '10', w: '4' },
+    ] };
+    const features = [
+      sketch,
+      { id: 'e1', type: 'extrude', name: 'Extrude1', sketch: 's1', profiles: ['r1'], distance: '10', extent: 'one', operation: 'new', targets: [] },
+      { id: 'f1', type: 'fillet', name: 'Fillet1', radius: '3', edges: [{ body: 'b:e1', p: [30, 20, 5], dir: [0, 0, 1], type: 'LINE', len: 10 }] },
+      { id: 'c2', type: 'cylinder', name: 'Cyl1', d: '8', h: '30', axis: 'Z', x: '20', y: '0', z: '0', operation: 'cut', targets: [] },
+      { id: 'b2', type: 'box', name: 'Box1', w: '20', d: '20', h: '20', x: '0', y: '60', z: '0', operation: 'new', targets: [] },
+      { id: 'sh', type: 'shell', name: 'Shell1', thickness: '2', faces: [{ body: 'b:b2', p: [0, 60, 20], n: [0, 0, 1], planar: true, size: 20 }] },
+      { id: 'pt', type: 'pattern', name: 'Pattern1', bodies: ['b:b2'], kind: 'rect', countX: '3', spacingX: '30', countY: '1', spacingY: '0', join: false },
+      { id: 's2', type: 'sketch', name: 'Sketch2', plane: { type: 'std', name: 'XZ', offset: '0' }, entities: [ { id: 'q', type: 'rect', x: '50', y: '0', w: '10', h: '20' } ] },
+      { id: 'rv', type: 'revolve', name: 'Revolve1', sketch: 's2', profiles: ['q'], axis: 'y', angle: '270', operation: 'new', targets: [] },
+    ];
+    try {
+      const r = await k.rebuild({ params: [{ name: 'w', expr: '60 mm' }], features, quality: 'normal' });
+      log(`rebuild ${r.ms} ms, bodies: ${r.bodies.length}`, 'ok');
+      for (const b of r.bodies) log(`  ${b.id}: tris=${b.triangles.length / 3} faces=${b.groups.length} edges=${b.edgeInfo.length} vol=${b.volume.toFixed(1)}`);
+      log('errors: ' + JSON.stringify(r.errors), Object.keys(r.errors).length ? 'bad' : 'ok');
+      log('warnings: ' + JSON.stringify(r.warnings));
+      const r2 = await k.rebuild({ params: [{ name: 'w', expr: '70 mm' }], features, quality: 'normal' });
+      log(`param change rebuild ${r2.ms} ms, errors: ${JSON.stringify(r2.errors)}`, Object.keys(r2.errors).length ? 'bad' : 'ok');
+      const step = await k.export({ format: 'step', bodies: r2.bodies.map((b) => ({ id: b.id, name: b.id, color: '#888888' })) });
+      log(`STEP export: ${step.size} bytes`, step.size > 1000 ? 'ok' : 'bad');
+      const stl = await k.export({ format: 'stl', bodies: r2.bodies.map((b) => ({ id: b.id })) });
+      log(`STL export: ${stl.size} bytes`, stl.size > 1000 ? 'ok' : 'bad');
+      log('DONE', 'ok');
+    } catch (e) {
+      log('ERROR ' + e.message, 'bad');
+    }
+  </script>
+</body>
+</html>

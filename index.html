@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fusion720</title>
+  <meta name="description" content="Fusion720 — an open-source, browser-based parametric CAD modeller." />
+  <meta name="theme-color" content="#191c22" />
+  <meta property="og:title" content="Fusion720" />
+  <meta property="og:description" content="Open-source parametric CAD in your browser: sketches with constraints, extrude, fillet, timeline, STEP/STL export. No install." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff7a1a'/%3E%3Cpath d='M9 22V10h10M9 16h7' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='22' cy='21' r='3' fill='white'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/app.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M9 22V10h10M9 16h7" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="22" cy="21" r="3" fill="#fff"/></svg>
+        </div>
+        <div class="brand-text">
+          <input id="doc-name" class="doc-name" spellcheck="false" value="Untitled" aria-label="Document name" />
+          <span id="save-state" class="save-state">Saved locally</span>
+        </div>
+      </div>
+      <div id="file-actions" class="file-actions"></div>
+      <nav id="toolbar" class="toolbar" aria-label="Tools"></nav>
+      <div class="top-right">
+        <button id="palette-btn" class="search-btn" title="Search commands (Ctrl+K)">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></svg>
+          <span>Search commands</span><kbd>Ctrl K</kbd>
+        </button>
+        <button id="theme-btn" class="icon-btn" title="Toggle light / dark theme"></button>
+      </div>
+    </header>
+
+    <aside id="browser" class="panel left-panel" aria-label="Browser"></aside>
+
+    <main id="viewport-wrap">
+      <div id="viewport"></div>
+      <div id="viewcube"></div>
+      <div id="view-controls" class="view-controls"></div>
+      <div id="sketch-banner" class="sketch-banner hidden"></div>
+      <div id="hud" class="hud hidden"></div>
+      <div id="measure-readout" class="measure-readout hidden"></div>
+      <div id="loading" class="loading">
+        <div class="loading-card">
+          <div class="spinner"></div>
+          <div>
+            <div class="loading-title">Starting the geometry kernel</div>
+            <div id="loading-detail" class="loading-detail">Downloading OpenCascade (~23 MB, cached after the first visit)…</div>
+            <div class="progress"><div id="loading-bar" class="progress-bar"></div></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside id="inspector" class="panel right-panel" aria-label="Inspector"></aside>
+
+    <footer id="bottombar">
+      <div id="timeline" class="timeline" aria-label="Timeline"></div>
+      <div id="statusbar" class="statusbar">
+        <span id="status-hint" class="status-hint">Loading…</span>
+        <span class="status-spacer"></span>
+        <span id="status-kernel" class="pill">Kernel: loading</span>
+        <span id="status-units" class="pill">mm</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="overlay-root"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
