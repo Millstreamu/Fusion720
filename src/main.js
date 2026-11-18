@@ -13,6 +13,7 @@ import { Timeline } from './ui/timeline.js';
 import { openPalette } from './ui/palette.js';
 import { openParams } from './ui/params.js';
 import { FEATURES } from './model/features.js';
+import { openLibrary } from './ui/library.js';
 
 const $ = (id) => document.getElementById(id);
 const appEl = $('app');
@@ -47,7 +48,16 @@ const kernel = new Kernel({
 });
 const app = new App({ kernel, viewport: vp });
 app.sketcher = new Sketcher(app, vp, $('hud'));
-vp.interceptor = app.sketcher;
+// pointer handling: the sketcher (sketch mode) first, then assembly dragging
+const handlers = [app.sketcher, app.asm];
+vp.interceptor = {
+  wantsLeft: () => handlers.some((x) => x.wantsLeft?.()),
+  pointerdown: (e) => handlers.some((x) => x.pointerdown?.(e)),
+  pointermove: (e) => handlers.some((x) => x.pointermove?.(e)),
+  pointerup: (e, click) => handlers.some((x) => x.pointerup?.(e, click)),
+  pointerleave: () => handlers.some((x) => x.pointerleave?.()),
+  dblclick: (e) => handlers.forEach((x) => x.dblclick?.(e)),
+};
 
 // ---------------------------------------------------------------- UI helpers exposed to panels/commands
 const ui = {
@@ -65,6 +75,9 @@ const ui = {
   showShortcuts,
   featureMenu,
   bodyMenu,
+  componentMenu,
+  jointMenu,
+  openLibrary: (mode = 'open') => openLibrary(app, { mode, onFile: () => fileInput.click() }),
 };
 
 const commands = buildCommands(app, ui);
@@ -97,19 +110,41 @@ exportBtn.addEventListener('click', () => {
   ]);
 });
 tooltip(exportBtn, { title: 'Export', desc: 'STEP for other CAD tools, STL for 3D printing' });
+const newBtn = h('button.icon-btn', { html: icon('file'), 'aria-label': 'New', 'aria-haspopup': 'menu' }, h('span.lbl', { text: 'New' }));
+newBtn.addEventListener('click', () => {
+  const r = newBtn.getBoundingClientRect();
+  contextMenu(r.left, r.bottom + 6, [
+    { label: 'New part', icon: 'body', run: () => app.newDocument() },
+    { label: 'New assembly', icon: 'assembly', run: () => app.newAssemblyDoc() },
+    '-',
+    { label: 'Example part: bracket', icon: 'sparkle', run: () => app.loadExample() },
+    { label: 'Example assembly: hinge', icon: 'sparkle', run: () => app.loadExampleAssembly() },
+  ]);
+});
+tooltip(newBtn, { title: 'New', desc: 'Start a new part or assembly. Everything is kept in My designs.' });
+const openBtn = h('button.icon-btn', { html: icon('folder'), 'aria-label': 'My designs', on: { click: () => ui.openLibrary('open') } }, h('span.lbl', { text: 'Open' }));
+tooltip(openBtn, { title: 'My designs', desc: 'Open any part or assembly saved in this browser, or a file', key: 'Ctrl+O' });
+const returnChip = h('button.return-chip.hidden', { html: icon('prev'), on: { click: () => app.returnTo && app.openDesign(app.returnTo.id) } });
 $('file-actions').append(
-  topButton('file', 'New', 'New design', () => app.newDocument()),
-  topButton('open', 'Open', 'Open a .f720.json design (Ctrl+O)', () => fileInput.click()),
-  topButton('save', 'Save', 'Save design file (Ctrl+S)', () => app.saveFile()),
-  exportBtn, undoBtn, redoBtn,
+  newBtn, openBtn,
+  topButton('save', 'Save', 'Download design file (Ctrl+S)', () => app.saveFile()),
+  exportBtn, undoBtn, redoBtn, returnChip,
 );
+function renderReturn() {
+  const r = app.returnTo;
+  returnChip.classList.toggle('hidden', !r);
+  if (r) { returnChip.innerHTML = `${icon('prev')}<span>Back to ${escapeHtml(r.name)}</span>`; }
+  $('save-state').innerHTML = `${escapeHtml($('save-state').dataset.text || 'Saved')}${app.isAssembly ? '<span class="kind-badge">Assembly</span>' : ''}`;
+}
+app.on('returnTo', renderReturn);
+app.on('mode', renderReturn);
 $('palette-btn').addEventListener('click', () => openPalette(commands));
 
 const docName = $('doc-name');
 docName.addEventListener('change', () => app.renameDoc(docName.value.trim()));
 docName.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') docName.blur(); });
 app.on('doc', () => { if (document.activeElement !== docName) docName.value = app.doc.name; undoBtn.disabled = !app.undoStack.length; redoBtn.disabled = !app.redoStack.length; });
-app.on('saveState', (s) => { $('save-state').textContent = s; });
+app.on('saveState', (s) => { $('save-state').dataset.text = s; renderReturn(); });
 
 function setTheme(d) {
   dark = d;
@@ -201,9 +236,18 @@ const welcome = h('div.welcome');
 const suggestChip = h('div.suggest-chip.hidden');
 wrap.append(welcome, suggestChip);
 function renderOverlays() {
-  const empty = !app.doc.features.length && !app.cmd && app.mode === 'model';
+  const asmEmpty = app.isAssembly && !app.doc.components.length && !app.cmd;
+  const empty = (!app.isAssembly && !app.doc.features.length && !app.cmd && app.mode === 'model') || asmEmpty;
   welcome.classList.toggle('hidden', !empty);
-  if (empty && !welcome.firstChild) {
+  if (empty && welcome.dataset.kind !== (asmEmpty ? 'asm' : 'part')) { clear(welcome); welcome.dataset.kind = asmEmpty ? 'asm' : 'part'; }
+  if (asmEmpty && !welcome.firstChild) {
+    welcome.append(
+      h('h2', { text: 'Put your parts together' }),
+      h('p', { text: 'Insert parts you’ve modelled, then join them with hinges, sliders or rigid joints.' }),
+      h('div.actions', {},
+        h('button.btn.primary', { html: icon('insert'), on: { click: () => ui.openLibrary('insert') } }, h('span', { text: 'Insert a part' })),
+        h('button.btn', { html: icon('sparkle'), on: { click: () => app.loadExampleAssembly() } }, h('span', { text: 'Open example assembly' }))));
+  } else if (empty && !welcome.firstChild) {
     welcome.append(
       h('h2', { text: 'What will you design today?' }),
       h('p', { text: 'Start with a sketch, drop in a primitive, or explore the example.' }),
@@ -250,6 +294,8 @@ function statusHint() {
   }
   if (c && c.type === 'sketchPlane') return 'Select an origin plane or a flat face to sketch on · <kbd>Esc</kbd> to cancel';
   if (c && c.type === 'measure') return 'Click points on faces or edges to measure · <kbd>Esc</kbd> to finish';
+  if (c && c.type === 'joint') return c.pick ? `Click a flat face, circular edge or straight edge on the ${c.pick === 'a' ? 'first' : 'second'} component · <kbd>Esc</kbd> to cancel` : 'Choose the joint type and adjust · <kbd>Enter</kbd> OK · <kbd>Esc</kbd> cancel';
+  if (app.isAssembly) return 'Drag a part to move it along its joints · <kbd>J</kbd> joint · <kbd>Shift I</kbd> insert part · <kbd>G</kbd> ground · <kbd>Right-drag</kbd> orbit';
   if (c && c.draft) {
     const pick = { profiles: 'Click sketch profiles to select them', edges: 'Click edges to select them', faces: 'Click faces to select them', bodies: 'Click bodies to select them', body: 'Click a body' }[c.pick];
     return `${pick ? `${pick} · ` : ''}Drag the ↔ handles or type values · <kbd>Enter</kbd> OK · <kbd>Esc</kbd> cancel`;
@@ -257,7 +303,7 @@ function statusHint() {
   return 'Click to select · <kbd>Right-drag</kbd> orbit · <kbd>Middle-drag</kbd> pan · <kbd>Wheel</kbd> zoom · <kbd>S</kbd> search commands';
 }
 const renderStatus = () => { $('status-hint').innerHTML = statusHint(); };
-for (const evt of ['command', 'mode', 'sketchTool', 'draft']) app.on(evt, renderStatus);
+for (const evt of ['command', 'mode', 'sketchTool', 'draft', 'doc']) app.on(evt, renderStatus);
 renderStatus();
 
 // ---------------------------------------------------------------- context menus
@@ -275,6 +321,34 @@ function featureMenu(id, x, y) {
     { label: 'Delete', icon: 'trash', danger: true, run: () => app.deleteFeature(id) },
   ]);
 }
+function componentMenu(id, x, y) {
+  const asm = app.asm, c = asm.comp(id);
+  if (!c) return;
+  const vis = c.visible !== false;
+  contextMenu(x, y, [
+    { label: 'Edit part', icon: 'edit', run: () => asm.editPart(id) },
+    { label: 'Joint…', icon: 'joint', key: 'J', run: () => asm.startJoint() },
+    { label: c.grounded ? 'Unground' : 'Ground', icon: 'ground', key: 'G', run: () => asm.toggleGround([id]) },
+    { label: 'Rename…', icon: 'rename', run: () => promptText('Rename component', c.name, (n) => asm.setComponent(id, { name: n }, 'Rename component')) },
+    { label: vis ? 'Hide' : 'Show', icon: vis ? 'eyeOff' : 'eye', run: () => asm.setComponent(id, { visible: !vis }, vis ? 'Hide component' : 'Show component') },
+    { label: 'Duplicate', icon: 'copy', run: () => asm.insertPart(c.part) },
+    '-',
+    { label: 'Remove', icon: 'remove', danger: true, key: 'Del', run: () => asm.removeComponents([id]) },
+  ]);
+}
+
+function jointMenu(id, x, y) {
+  const asm = app.asm, j = app.doc.joints.find((q) => q.id === id);
+  if (!j) return;
+  contextMenu(x, y, [
+    { label: 'Edit joint', icon: 'edit', run: () => asm.startJoint(id) },
+    { label: 'Rename…', icon: 'rename', run: () => promptText('Rename joint', j.name, (n) => app.commit('Rename joint', (d) => { d.joints.find((q) => q.id === id).name = n; }, { rebuild: false })) },
+    { label: j.suppressed ? 'Unsuppress' : 'Suppress', icon: 'suppress', run: () => asm.toggleSuppressJoint(id) },
+    '-',
+    { label: 'Delete', icon: 'trash', danger: true, run: () => asm.deleteJoint(id) },
+  ]);
+}
+
 function bodyMenu(id, x, y) {
   const vis = app.bodyVisible(id);
   contextMenu(x, y, [
@@ -292,6 +366,17 @@ function bodyMenu(id, x, y) {
 }
 app.on('context', ({ hit, event }) => {
   if (app.mode === 'sketch') return;
+  if (app.isAssembly) {
+    const cid = hit && hit.bodyId ? app.asm.compOfBody(hit.bodyId) : null;
+    if (cid) { app.selection = new Set([cid]); app.asm.updateHighlights(); app.emit('selection'); return componentMenu(cid, event.clientX, event.clientY); }
+    return contextMenu(event.clientX, event.clientY, [
+      { label: 'Insert part…', icon: 'insert', key: 'Shift+I', run: () => ui.openLibrary('insert') },
+      { label: 'Joint…', icon: 'joint', key: 'J', run: () => app.asm.startJoint() },
+      '-',
+      { label: 'Home view', icon: 'home', key: 'Home', run: () => vp.setView('home') },
+      { label: 'Fit all', icon: 'fit', key: 'F6', run: () => vp.fit() },
+    ]);
+  }
   if (hit && hit.bodyId) { app.selectBodies([hit.bodyId]); return bodyMenu(hit.bodyId, event.clientX, event.clientY); }
   contextMenu(event.clientX, event.clientY, [
     { label: 'Create sketch', icon: 'sketch', run: () => app.startSketchFlow() },
@@ -321,12 +406,12 @@ document.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
   if (ctrl && k === 's') { e.preventDefault(); return app.saveFile(); }
-  if (ctrl && k === 'o') { e.preventDefault(); return fileInput.click(); }
+  if (ctrl && k === 'o') { e.preventDefault(); return ui.openLibrary('open'); }
   if (ctrl && k === 'k') { e.preventDefault(); return openPalette(commands); }
   if (ctrl && k === 'p') { e.preventDefault(); return openParams(app); }
   if (typing) {
     if (e.key === 'Escape') t.blur();
-    if (e.key === 'Enter' && app.cmd && app.cmd.draft && $('inspector').contains(t) && t.dataset.key !== '__name') { t.blur(); setTimeout(() => app.okCommand(), 30); }
+    if (e.key === 'Enter' && app.cmd && (app.cmd.draft || app.cmd.type === 'joint') && $('inspector').contains(t) && t.dataset.key !== '__name' && t.dataset.key !== '__jname') { t.blur(); setTimeout(() => app.okCommand(), 30); }
     return;
   }
   if (ctrl && k === 'z' && !e.shiftKey) { e.preventDefault(); return app.undo(); }
@@ -341,11 +426,13 @@ document.addEventListener('keydown', (e) => {
     if (app.selection.size) { app.selection.clear(); app.updateHighlights(); app.emit('selection'); }
     return;
   }
+  if (e.key === 'Enter' && app.cmd && app.cmd.type === 'joint') { e.preventDefault(); return app.okCommand(); }
   if (e.key === 'Enter' && app.cmd && app.cmd.draft) {
     e.preventDefault();
     if (app.cmd.pick === 'edges' || app.cmd.pick === 'faces') return app.setPickField(app.cmd.pickKey);
     return app.okCommand();
   }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && app.isAssembly && !app.cmd && app.selectedJoint) return app.asm.deleteJoint(app.selectedJoint);
   if ((e.key === 'Delete' || e.key === 'Backspace') && app.mode === 'model' && !app.cmd && app.selection.size) return app.removeBodies([...app.selection]);
   if (e.key === 'Home') return vp.setView('home');
   if (e.key === 'F6') { e.preventDefault(); return vp.fit(); }
@@ -353,6 +440,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'O' && e.shiftKey) return ui.toggleOrtho();
   if (e.key === '?') return showShortcuts();
   if (k === 's' || k === '/') { e.preventDefault(); return openPalette(commands); }
+  if (app.isAssembly) {
+    if (e.key === 'I' && e.shiftKey) return ui.openLibrary('insert');
+    if (e.shiftKey) return;
+    if (k === 'j') return app.asm.startJoint();
+    if (k === 'g' && app.selection.size) return app.asm.toggleGround([...app.selection]);
+    if (k === 'i') return app.startMeasure();
+    return;
+  }
   if (app.mode !== 'model' || e.shiftKey) return;
   const map = { e: 'extrude', v: 'revolve', f: 'fillet', m: 'move', b: 'box' };
   if (map[k]) return app.startCommand(map[k]);

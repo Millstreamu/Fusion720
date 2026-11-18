@@ -63,6 +63,8 @@ designs autosave in their own browser; nothing is uploaded anywhere. The kernel 
 | **Modify** | Fillet, Chamfer, Shell, Combine, Move / Copy (translate + rotate), Mirror, Rectangular & circular Pattern, Remove |
 | **Parametric** | Full feature timeline with rollback marker, edit any feature later, suppress, delete, live preview while editing; user **Parameters** with units (`mm cm m in ft deg`) and math (`sin cos sqrt min max …`) usable in every field |
 | **Robust references** | Fillet / chamfer / shell selections are stored with geometry type, adjacent-face signature and bounding-box-relative position, so they survive most upstream dimension changes |
+| **Assemblies** | Insert parts from My designs as components (insert the same part many times), connect them with **joints** — Rigid, Revolute, Slider, Cylindrical, Planar, Ball — by clicking a flat face, circular edge (snaps to its center) or straight edge on each part. Offset, angle and flip per joint (parameters work). First part is grounded; drag parts to move them along their joints; degrees of freedom and conflicting joints are reported. Parts stay linked: **Edit part** opens it, and the assembly updates when you come back. Export the whole assembly to STEP/STL |
+| **My designs** | Every part and assembly autosaves to a library in your browser; open, switch between and delete designs; download/open `.f720.json` files to back up or share (assembly files carry their parts) |
 | **Inspect** | Measure (snaps to edge ends/midpoints), section view, volume / area / mass / size per body |
 | **View** | View cube, home / standard views, fit, perspective ↔ orthographic, shaded / edges / wireframe, adaptive infinite grid, light & dark themes |
 | **Files** | Autosave in the browser, save/open `.f720.json` (plain JSON, diff-friendly), export **STEP** (to other CAD tools) and **STL** (3D printing), drag-and-drop a design onto the window |
@@ -79,6 +81,8 @@ designs autosave in their own browser; nothing is uploaded anywhere. The kernel 
 | Extrude / Revolve / Fillet / Move / Box / Measure | `E` / `V` / `F` / `M` / `B` / `I` |
 | Sketch tools | `L` line, `R` rectangle, `Shift R` center rectangle, `C` circle, `P` polygon, `O` slot, `X` construction |
 | Sketch constraints | `D` dimension, `H` horizontal/vertical, `T` tangent; click a glyph to select it, right-click a glyph or dimension to delete it |
+| Assemblies | `Shift I` insert part, `J` joint, `G` ground/unground, drag a part to move it |
+| My designs | `Ctrl O` |
 | Finish sketch | `Ctrl Enter` |
 | OK / Cancel a feature | `Enter` / `Esc` |
 | Undo / Redo | `Ctrl Z` / `Ctrl Y` |
@@ -98,6 +102,10 @@ src/model/              pure data + math (shared with the worker)
   expr.js               safe expression evaluator with units and parameters
   profiles.js           sketch entities, outlines, profile/region detection
   constraints.js        sketch constraint solver (Levenberg–Marquardt) + degrees-of-freedom analysis
+  assembly.js           assembly model, quaternion maths and the joint solver
+  library.js            "My designs" storage (one localStorage entry per design)
+src/assembly/
+  controller.js         assembly mode: insert, joints (picking + re-resolving on part changes), drag, export
   features.js           feature registry: defaults + inspector field specs
   geom.js               vectors and sketch-plane frames
   example.js            the example bracket
@@ -131,13 +139,15 @@ This is a strong foundation, not feature parity with a commercial CAD suite (yet
 - No arcs/splines inside polylines, no sketch fillets, no projecting edges into sketches.
 - Sketches on faces are placed at the face's position when created; they don't follow the face if it moves.
 - Edge/face references use smart heuristics, not full topological naming, so big topology changes can still break a fillet (it shows a clear error and you can re-pick the edges).
-- No assemblies/joints, drawings, CAM, simulation or cloud collaboration.
+- Assemblies: no sub-assemblies (assemblies inside assemblies), no joint limits, motion studies or interference checking yet.
+- My designs lives in this browser's storage. Clearing site data removes it, and other browsers/devices don't see it — use **Save** to download `.f720.json` backups or to share.
+- No drawings, CAM, simulation or cloud collaboration.
 - Needs internet on first load (three.js and the kernel come from jsDelivr). To run fully offline, vendor those files locally and update the URLs in `index.html` and `src/kernel/worker.js`.
 
 ## Roadmap ideas
 
 Arcs + sketch fillets, project/offset in sketches, hole & thread
-features, sweep and loft UI, press-pull on faces, assemblies with joints, 2D drawings, fully offline
+features, sweep and loft UI, press-pull on faces, sub-assemblies, joint limits and motion studies, 2D drawings, fully offline
 build, and PWA install.
 
 ## License

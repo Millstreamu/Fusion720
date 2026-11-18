@@ -1,7 +1,7 @@
 // Floating, context-aware toolbar (switches between modeling and sketching tools).
 import { h, clear, tooltip, contextMenu } from './dom.js';
 import { icon } from './icons.js';
-import { MODEL_TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
+import { MODEL_TOOLBAR, SKETCH_TOOLBAR, ASSEMBLY_TOOLBAR } from './commands.js';
 
 export class Toolbar {
   constructor(host, app, commands) {
@@ -53,7 +53,7 @@ export class Toolbar {
 
   render() {
     clear(this.el);
-    const layout = this.app.mode === 'sketch' ? SKETCH_TOOLBAR : MODEL_TOOLBAR;
+    const layout = this.app.mode === 'sketch' ? SKETCH_TOOLBAR : this.app.isAssembly ? ASSEMBLY_TOOLBAR : MODEL_TOOLBAR;
     for (const g of layout) {
       const group = h('div.tb-group');
       if (g.label) group.append(h('div.tb-label', { text: g.label }));

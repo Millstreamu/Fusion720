@@ -30,11 +30,11 @@ export class Kernel {
     });
   }
 
-  /** Rebuild; if a rebuild is in flight the newest request replaces any queued one. */
-  rebuild(payload) {
+  /** Rebuild (a part, or type 'assembly'); the newest request replaces any queued one. */
+  rebuild(payload, type = 'rebuild') {
     return new Promise((resolve, reject) => {
       if (this.queued) this.queued.resolve(null); // superseded
-      this.queued = { payload, resolve, reject };
+      this.queued = { type, payload, resolve, reject };
       this._pump();
     });
   }
@@ -44,10 +44,11 @@ export class Kernel {
     const job = this.queued;
     this.queued = null;
     this.running = true;
-    try { job.resolve(await this.call('rebuild', job.payload)); } catch (e) { job.reject(e); }
+    try { job.resolve(await this.call(job.type, job.payload)); } catch (e) { job.reject(e); }
     this.running = false;
     this._pump();
   }
 
   export(payload) { return this.call('export', payload); }
+  exportAssembly(payload) { return this.call('exportAssembly', payload); }
 }

@@ -8,8 +8,10 @@ import { planeFrame, framesForFace, STD_PLANES, dist } from './model/geom.js';
 import { BODY_COLORS } from './viewer/viewport.js';
 import { toast, download } from './ui/dom.js';
 import { exampleDoc } from './model/example.js';
+import { library, newDocId } from './model/library.js';
+import { newAssembly } from './model/assembly.js';
+import { AssemblyController, exampleAssembly } from './assembly/controller.js';
 
-const AUTOSAVE_KEY = 'fusion720.autosave.v1';
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 export class App {
@@ -30,9 +32,14 @@ export class App {
     this.busy = false;
     this.measure = null;
     this.suggestion = null;
+    this.returnTo = null;
+    this.selectedJoint = null;
+    this.asm = new AssemblyController(this);
     viewport.onPick = (hit, e) => this.handlePick(hit, e);
     viewport.onContext = (hit, e) => this.emit('context', { hit, event: e });
   }
+
+  get isAssembly() { return this.doc.kind === 'assembly'; }
 
   // ------------------------------------------------------------ events
   on(evt, fn) { if (!this.listeners.has(evt)) this.listeners.set(evt, new Set()); this.listeners.get(evt).add(fn); return () => this.listeners.get(evt).delete(fn); }
@@ -41,8 +48,14 @@ export class App {
   // ------------------------------------------------------------ document + history
   load(doc, { keepHistory = false } = {}) {
     this.doc = { ...newDoc(), ...clone(doc) };
+    if (!this.doc.id) this.doc.id = newDocId();
     if (!keepHistory) { this.undoStack = []; this.redoStack = []; }
-    this.mode = 'model'; this.sketchId = null; this.cmd = null; this.selection.clear(); this.measure = null; this.suggestion = null;
+    this.mode = 'model'; this.sketchId = null; this.cmd = null; this.selection.clear(); this.measure = null; this.suggestion = null; this.selectedJoint = null;
+    this.result = { bodies: [], errors: {}, warnings: {} };
+    this.vp.setMarkers?.([]);
+    this.vp.pickFilter = 'idle';
+    if (this.isAssembly) this.asm.onLoad();
+    library.setCurrent(this.doc.id);
     this._afterDocChange();
     this.emit('mode');
     this.emit('command');
@@ -94,20 +107,53 @@ export class App {
     this.autosave();
   }
 
+  /** Every design autosaves into "My designs" (this browser's library). */
   autosave() {
     clearTimeout(this._saveTimer);
     this.emit('saveState', 'Saving…');
-    this._saveTimer = setTimeout(() => {
-      try { localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(this.doc)); this.emit('saveState', 'Saved locally'); } catch { this.emit('saveState', 'Not saved'); }
-    }, 350);
+    this._saveTimer = setTimeout(() => this.flushSave(), 350);
+  }
+
+  flushSave() {
+    clearTimeout(this._saveTimer);
+    const ok = library.put(this.doc);
+    library.setCurrent(this.doc.id);
+    this.emit('saveState', ok ? 'Saved to My designs' : 'Not saved (browser storage full?)');
   }
 
   restoreAutosave() {
-    try {
-      const s = localStorage.getItem(AUTOSAVE_KEY);
-      if (s) { const d = JSON.parse(s); if (d && d.format === 'fusion720') { this.load(d); return true; } }
-    } catch { /* storage unavailable */ }
+    library.migrate();
+    const d = library.get(library.getCurrent());
+    if (d && d.format === 'fusion720') { this.load(d); return true; }
     return false;
+  }
+
+  /** Open a design from the library by id (saving the current one first). */
+  openDesign(id) {
+    const d = library.get(id);
+    if (!d) { toast('That design is no longer in My designs', 'err'); return; }
+    if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+    if (this.returnTo && this.returnTo.id === id) this.returnTo = null;
+    this.load(d);
+    this.emit('returnTo');
+    setTimeout(() => this.vp.setView('home'), 400);
+  }
+
+  newAssemblyDoc() {
+    if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+    this.returnTo = null;
+    this.load(newAssembly());
+    this.flushSave();
+    this.emit('returnTo');
+    this.vp.setView('home');
+  }
+
+  loadExampleAssembly() {
+    if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+    const existing = library.get('ex-assembly');
+    this.load(existing || exampleAssembly());
+    this.flushSave();
+    setTimeout(() => this.vp.setView('home'), 600);
   }
 
   // ------------------------------------------------------------ rebuild
@@ -134,6 +180,7 @@ export class App {
 
   requestRebuild() {
     if (!this.kernel.isReady) { this._pendingRebuild = true; return; }
+    if (this.isAssembly) { this.asm.rebuild(); return; }
     const features = this.featuresForRebuild();
     this.busy = true;
     this.emit('busy', true);
@@ -169,6 +216,7 @@ export class App {
   bodyVisible(id) { return this.bodyMeta(id).visible !== false; }
 
   applyBodyStyles() {
+    if (this.isAssembly) { this.asm.applyStyles(); return; }
     const draftNew = this.cmd && this.cmd.draft && !this.cmd.editId ? `b:${this.cmd.draft.id}` : null;
     this.vp.setBodies(this.result.bodies.map((b) => ({
       id: b.id, data: b, color: b.id.startsWith(draftNew || '\u0000') ? '#7fb0ff' : this.bodyColor(b.id),
@@ -218,6 +266,7 @@ export class App {
   }
 
   refreshSketches() {
+    if (this.isAssembly) { this.vp.setSketches([]); this.vp.setDimensions(null); this.vp.setGlyphs(null); return; }
     const list = [];
     const c = this.cmd;
     const active = activeFeatures(this.doc);
@@ -267,6 +316,7 @@ export class App {
   // ------------------------------------------------------------ sketch mode
   startSketchFlow() {
     if (this.mode === 'sketch') return;
+    if (this.isAssembly) { toast('Sketches live in parts. Open a part (right-click a component → Edit part) to model it.', 'info', 3500); return; }
     this.cancelCommand(true);
     this.cmd = { type: 'sketchPlane' };
     this.vp.showOriginPlanes(true);
@@ -458,6 +508,7 @@ export class App {
 
   // ------------------------------------------------------------ feature commands
   startCommand(type, preset = {}) {
+    if (this.isAssembly) { toast('That is a part tool. In an assembly, insert parts and join them — or right-click a component → Edit part.', 'info', 3500); return; }
     if (this.mode === 'sketch') this.finishSketch();
     this.cancelCommand(true);
     const def = FEATURES[type];
@@ -542,6 +593,7 @@ export class App {
 
   okCommand() {
     const c = this.cmd;
+    if (c && c.type === 'joint') { this.asm.okJoint(); return; }
     if (!c || !c.draft) return;
     if (this.busy) { this._okWhenIdle = true; return; }
     const err = this.result.errors[c.draft.id];
@@ -565,7 +617,8 @@ export class App {
     this.vp.pickFilter = this.mode === 'sketch' ? 'none' : 'idle';
     this.emit('command');
     this.refreshSketches();
-    if (c.draft) this.requestRebuild();
+    if (c.type === 'joint') this.asm.afterCancel();
+    else if (c.draft) this.requestRebuild();
     else this.applyBodyStyles();
     if (!silent) this.emit('selection');
   }
@@ -575,6 +628,7 @@ export class App {
     const c = this.cmd;
     const multi = e && (e.shiftKey || e.ctrlKey || e.metaKey);
     if (this.mode === 'sketch') return;
+    if (this.isAssembly && !(c && c.type === 'measure')) { this.asm.handlePick(hit, e); return; }
     if (c && c.type === 'sketchPlane') {
       if (!hit) return;
       if (hit.kind === 'plane') return this.createSketch({ type: 'std', name: hit.plane, offset: '0' });
@@ -638,6 +692,7 @@ export class App {
   }
 
   updateHighlights() {
+    if (this.isAssembly) { this.asm.updateHighlights(); return; }
     const c = this.cmd;
     const H = { bodies: new Set(), faces: [], edges: [] };
     if (c && c.draft) {
@@ -668,10 +723,11 @@ export class App {
     if (hit.kind === 'edge') {
       const e = this.vp.bodies.get(hit.bodyId).data;
       const info = hit.info, P = e.edgePts;
-      const s = [P[info.start * 3], P[info.start * 3 + 1], P[info.start * 3 + 2]];
+      const w = (q) => this.vp.toWorldOf(hit.bodyId, q); // component placement in assemblies
+      const s = w([P[info.start * 3], P[info.start * 3 + 1], P[info.start * 3 + 2]]);
       const end = (info.start + info.count - 1) * 3;
-      const t = [P[end], P[end + 1], P[end + 2]];
-      const cands = [s, t, info.mid];
+      const t = w([P[end], P[end + 1], P[end + 2]]);
+      const cands = [s, t, w(info.mid)];
       const px = this.vp.pixelSize() * 14;
       const near = cands.map((q) => [q, dist(q, p)]).sort((a, b) => a[1] - b[1])[0];
       if (near[1] < px) p = near[0];
@@ -726,6 +782,7 @@ export class App {
 
   removeBodies(ids) {
     if (!ids.length) return;
+    if (this.isAssembly) { this.asm.removeComponents(ids); return; }
     const f = { id: newId('f'), type: 'remove', name: nextName(this.doc, 'remove'), bodies: ids };
     this.selection.clear();
     this.commit(`Remove ${ids.length > 1 ? `${ids.length} bodies` : this.bodyName(ids[0])}`, (d) => this._insertFeature(d, f));
@@ -745,16 +802,20 @@ export class App {
   }
 
   // ------------------------------------------------------------ files
+  /** New part. The current design stays in My designs. */
   newDocument() {
-    if (this.doc.features.length && !confirm('Start a new design? Unsaved changes in this browser will be replaced (your file downloads are not affected).')) return;
-    this.load(newDoc());
-    this.autosave();
+    if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+    this.returnTo = null;
+    this.load({ ...newDoc(), id: newDocId() });
+    this.flushSave();
+    this.emit('returnTo');
     this.vp.setView('home');
   }
 
   loadExample() {
-    this.load(exampleDoc());
-    this.autosave();
+    if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+    this.load({ ...exampleDoc(), id: newDocId() });
+    this.flushSave();
     setTimeout(() => this.vp.setView('home'), 400);
   }
 
@@ -768,14 +829,20 @@ export class App {
     try {
       const d = JSON.parse(await file.text());
       if (d.format !== 'fusion720') throw new Error('Not a Fusion720 design file');
+      if (this.doc.features.length || (this.doc.components || []).length) this.flushSave();
+      if (!d.id || (library.has(d.id) && !confirm(`"${d.name}" is already in My designs. Replace it with the copy from this file?`))) d.id = newDocId();
+      // assemblies carry copies of their parts: add any that aren't in My designs yet so they can be edited
+      let imported = 0;
+      for (const [key, p] of Object.entries(d.parts || {})) if (!library.has(key)) { library.put({ ...p.doc, id: key }); imported++; }
       this.load(d);
-      this.autosave();
+      this.flushSave();
       setTimeout(() => this.vp.setView('home'), 400);
-      toast(`Opened ${file.name}`, 'ok');
+      toast(`Opened ${file.name}${imported ? ` (added ${imported} part${imported > 1 ? 's' : ''} to My designs)` : ''}`, 'ok');
     } catch (e) { toast(`Could not open file: ${e.message}`, 'err'); }
   }
 
   async exportFile(format) {
+    if (this.isAssembly) return this.asm.exportFile(format);
     const bodies = this.result.bodies.filter((b) => this.bodyVisible(b.id)).map((b) => ({ id: b.id, name: this.bodyName(b.id), color: this.bodyColor(b.id) }));
     if (!bodies.length) return toast('Nothing to export — create a body first.', 'warn');
     try {

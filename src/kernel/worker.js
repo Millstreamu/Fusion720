@@ -462,8 +462,12 @@ function applyFeature(f, state, scope, sketches, warn) {
 
 // ---------------------------------------------------------------- rebuild + meshing
 
-let cache = []; // [{ hash, state, error, warning }]
-let lastState = new State();
+// one build cache per document key ('main' for the open part, library ids for assembly parts)
+const stores = new Map();
+const store = (key = 'main') => {
+  if (!stores.has(key)) stores.set(key, { cache: [], lastState: new State() }); // cache: [{ hash, state, error, warning }]
+  return stores.get(key);
+};
 const meshCache = new WeakMap();
 let meshSeq = 0;
 
@@ -513,8 +517,10 @@ function meshShape(shape, quality) {
   return m;
 }
 
-function rebuild({ params, features, quality }) {
+function rebuild({ params, features, quality, key }) {
   const t0 = performance.now();
+  const st = store(key);
+  const cache = st.cache;
   const scope = evaluateParams(params || []);
   const scopeKey = JSON.stringify(scope, (k, v) => (v instanceof Error ? `!${v.message}` : v));
   const sketches = new Map(features.filter((f) => f.type === 'sketch').map((f) => [f.id, f]));
@@ -555,8 +561,8 @@ function rebuild({ params, features, quality }) {
   for (const c of newCache) for (const b of c.state.bodies.values()) live.add(b.shape);
   const dead = new Set();
   for (const c of cache) for (const b of c.state.bodies.values()) if (!live.has(b.shape)) dead.add(b.shape);
-  cache = newCache;
-  lastState = state;
+  st.cache = newCache;
+  st.lastState = state;
   for (const s of dead) { try { s.delete(); } catch { /* already freed */ } }
 
   const bodies = [];
@@ -571,8 +577,7 @@ function rebuild({ params, features, quality }) {
   return { bodies, errors, warnings, ms: Math.round(performance.now() - t0) };
 }
 
-function exportShapes({ format, bodies }) {
-  const list = bodies.map((b) => ({ ...b, shape: lastState.bodies.get(b.id)?.shape })).filter((b) => b.shape);
+function writeExport(format, list) {
   if (!list.length) throw new Error('There are no bodies to export');
   if (format === 'step') {
     return R.exportSTEP(list.map((b) => ({ shape: b.shape, name: b.name, color: b.color })), { unit: 'mm' });
@@ -581,13 +586,42 @@ function exportShapes({ format, bodies }) {
   return shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
 }
 
+function exportShapes({ format, bodies }) {
+  const st = store('main');
+  return writeExport(format, bodies.map((b) => ({ ...b, shape: st.lastState.bodies.get(b.id)?.shape })).filter((b) => b.shape));
+}
+
+/** Build every distinct part of an assembly (each with its own cache). */
+function rebuildAssembly({ parts, quality }) {
+  const t0 = performance.now();
+  const out = {};
+  for (const p of parts) out[p.key] = rebuild({ params: p.params, features: p.features, quality, key: p.key });
+  return { parts: out, ms: Math.round(performance.now() - t0) };
+}
+
+/** instances: [{ key, bodyId, name, color, t:[x,y,z], axis:[..], angle (deg) }] — placed copies of part bodies. */
+function exportAssembly({ format, instances }) {
+  const list = [];
+  for (const it of instances) {
+    const src = store(it.key).lastState.bodies.get(it.bodyId)?.shape;
+    if (!src) continue;
+    let s = src.clone();
+    if (Math.abs(it.angle) > 1e-9) s = s.rotate(it.angle, [0, 0, 0], it.axis);
+    s = s.translate(it.t);
+    list.push({ shape: s, name: it.name, color: it.color });
+  }
+  return writeExport(format, list);
+}
+
 self.onmessage = async (ev) => {
   const { id, type, payload } = ev.data;
   try {
     await ready;
     let result;
     if (type === 'rebuild') result = rebuild(payload);
+    else if (type === 'assembly') result = rebuildAssembly(payload);
     else if (type === 'export') result = exportShapes(payload);
+    else if (type === 'exportAssembly') result = exportAssembly(payload);
     else throw new Error(`Unknown request ${type}`);
     post({ id, ok: true, result });
   } catch (e) {

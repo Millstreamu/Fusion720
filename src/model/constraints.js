@@ -258,7 +258,7 @@ function buildVars(stored, evald) {
 function sumsq(r) { let s = 0; for (const x of r) s += x * x; return s; }
 function maxAbs(r) { let s = 0; for (const x of r) s = Math.max(s, Math.abs(x)); return s; }
 
-function jacobian(F, x, m) {
+export function jacobian(F, x, m) {
   const n = x.length;
   const J = Array.from({ length: m }, () => new Float64Array(n));
   for (let j = 0; j < n; j++) {
@@ -297,7 +297,7 @@ function solveLinear(M, b) {
 }
 
 /** Levenberg–Marquardt, minimum weighted-norm steps (stiff variables move less). */
-function lm(F, x0, stiff, { maxIter = 100, tol = 1e-10 } = {}) {
+export function lm(F, x0, stiff, { maxIter = 100, tol = 1e-10 } = {}) {
   let x = Float64Array.from(x0);
   let r = F(x);
   let cost = sumsq(r);
@@ -334,7 +334,7 @@ function lm(F, x0, stiff, { maxIter = 100, tol = 1e-10 } = {}) {
 }
 
 /** Which variables are pinned down by the constraints (reduced row echelon of J). */
-function determinedVars(J, n) {
+export function determinedVars(J, n) {
   const m = J.length;
   if (!m) return { det: new Array(n).fill(false), rank: 0 };
   const A = J.map((row) => Array.from(row));

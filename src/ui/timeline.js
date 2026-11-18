@@ -2,18 +2,46 @@
 import { h, clear, tooltip } from './dom.js';
 import { icon } from './icons.js';
 import { FEATURES } from '../model/features.js';
+import { JOINT_TYPES } from '../model/assembly.js';
 
 export class Timeline {
   constructor(el, app, ui) {
     this.el = el;
     this.app = app;
     this.ui = ui;
-    for (const evt of ['doc', 'result', 'command', 'mode']) app.on(evt, () => this.render());
+    for (const evt of ['doc', 'result', 'command', 'mode', 'selection']) app.on(evt, () => this.render());
     this.render();
+  }
+
+  renderAssembly() {
+    const app = this.app, asm = app.asm, doc = app.doc;
+    clear(this.el);
+    const failing = asm.status.failing || new Set();
+    const track = h('div.tl-track', { role: 'list', 'aria-label': 'Joints' });
+    track.append(h('span.tl-empty', { style: { paddingLeft: '0', paddingRight: '6px', whiteSpace: 'nowrap' }, text: `${doc.components.length} components · ${doc.joints.length} joints${doc.joints.length ? ` · ${asm.status.dof ?? 0} DOF` : ''}` }));
+    if (!doc.joints.length) track.append(h('span.tl-empty', { text: '— insert parts, then use Joint (J) to connect them' }));
+    const editingId = app.cmd && app.cmd.type === 'joint' ? app.cmd.editId : null;
+    for (const j of doc.joints) {
+      const cls = ['chip', j.suppressed ? 'suppressed' : '', failing.has(j.id) ? 'err' : '', editingId === j.id ? 'editing' : '', app.selectedJoint === j.id ? 'selected' : ''].filter(Boolean).join('.');
+      const chip = h(`div.${cls}`, {
+        role: 'listitem', tabindex: 0, html: icon(failing.has(j.id) ? 'error' : JOINT_TYPES[j.type].icon),
+        on: {
+          click: () => asm.selectJoint(j.id),
+          dblclick: () => asm.startJoint(j.id),
+          keydown: (e) => { if (e.key === 'Enter') asm.startJoint(j.id); },
+          contextmenu: (e) => { e.preventDefault(); this.ui.jointMenu(j.id, e.clientX, e.clientY); },
+        },
+      }, h('span.chip-name', { text: j.name }));
+      tooltip(chip, { title: j.name, desc: `${JOINT_TYPES[j.type].label}: ${asm.comp(j.a.comp)?.name} → ${asm.comp(j.b.comp)?.name}${failing.has(j.id) ? ' — can’t be satisfied' : ''}` });
+      track.append(chip);
+    }
+    if (app.cmd && app.cmd.type === 'joint' && !editingId) track.append(h('div.chip.draft', { html: icon(JOINT_TYPES[app.cmd.joint.type].icon) }, h('span.chip-name', { text: app.cmd.joint.name })));
+    this.el.append(track);
   }
 
   render() {
     const app = this.app;
+    if (app.isAssembly) return this.renderAssembly();
     const feats = app.doc.features;
     const marker = app.doc.marker == null ? feats.length : app.doc.marker;
     clear(this.el);

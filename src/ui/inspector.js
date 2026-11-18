@@ -2,6 +2,7 @@
 // body properties and getting-started help.
 import { h, clear, iconEl, toast } from './dom.js';
 import { CONSTRAINTS, HV, isLiteral as isFreeLiteral } from '../model/constraints.js';
+import { JOINT_TYPES, qToEuler, qFromEuler } from '../model/assembly.js';
 import { icon } from './icons.js';
 import { FEATURES } from '../model/features.js';
 import { tryEvaluate, fmt } from '../model/expr.js';
@@ -90,7 +91,7 @@ export class Inspector {
 
   pickField({ label, count, active, text, hint, onClick, onClear }) {
     const clearBtn = count ? h('button.icon-btn', { html: icon('x'), title: 'Clear selection', 'aria-label': `Clear ${label}`, on: { click: (e) => { e.stopPropagation(); onClear(); } } }) : null;
-    return h('div.field', {}, h('div.field-label', {}, h('span', { text: label })),
+    return h('div.field', {}, h('div.field-label', {}, typeof label === 'string' ? h('span', { text: label }) : label),
       h(`div.pick${active ? '.active' : ''}`, { role: 'button', tabindex: 0, on: { click: onClick, keydown: (e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); } } },
         h(`span.pick-count${count ? '' : '.zero'}`, { text: count }), h('span.pick-text', { text }), clearBtn),
       active && hint ? h('div.hint', { text: hint }) : null);
@@ -110,6 +111,8 @@ export class Inspector {
     let content;
     if (app.cmd && app.cmd.type === 'sketchPlane') content = this.renderSketchPlane();
     else if (app.cmd && app.cmd.type === 'measure') content = this.renderMeasure();
+    else if (app.cmd && app.cmd.type === 'joint') content = this.renderJoint();
+    else if (app.isAssembly) content = this.renderAssembly();
     else if (app.cmd && app.cmd.draft) content = this.renderFeature();
     else if (app.mode === 'sketch') content = this.renderSketch();
     else if (app.selection.size) content = this.renderBodies();
@@ -144,6 +147,127 @@ export class Inspector {
     return h('div.insp', {}, this.head('measure', h('div.insp-title', { text: 'Measure' }), 'Point-to-point distance'),
       h('div.insp-body', {}, h('div.banner.info', { html: icon('info') }, h('div', { text: 'Click on faces or edges. Edge clicks snap to their ends and midpoints. A third click starts a new measurement.' })), stats),
       h('div.insp-foot', {}, h('button.btn.grow.primary', { text: 'Done', on: { click: () => app.cancelCommand() } })));
+  }
+
+  // ------------------------------------------------------------ assemblies
+  renderJoint() {
+    const app = this.app, asm = app.asm, c = app.cmd, j = c.joint;
+    const set = (patch) => asm.updateJoint(patch);
+    const typeGrid = h('div.seg', { role: 'radiogroup', 'aria-label': 'Joint type', style: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)' } },
+      Object.entries(JOINT_TYPES).map(([k, t]) => h(`button${k === j.type ? '.on' : ''}`, { role: 'radio', 'aria-checked': String(k === j.type), title: t.desc, on: { click: () => set({ type: k }) } }, t.label)));
+    const pick = (side, label, color) => {
+      const s = j[side];
+      const comp = s && asm.comp(s.comp);
+      return this.pickField({
+        label: h('span', {}, h('span', { style: { display: 'inline-block', width: '9px', height: '9px', borderRadius: '50%', background: color, marginRight: '6px' } }), label),
+        count: s ? 1 : 0, active: c.pick === side,
+        text: s ? `${comp ? comp.name : '?'} · ${s.ref.label}` : c.pick === side ? 'Click a flat face, circular or straight edge' : 'Click to pick',
+        hint: 'Circular edges snap to their center — great for pins and holes',
+        onClick: () => asm.setJointPick(side), onClear: () => { set({ [side]: null }); asm.setJointPick(side); },
+      });
+    };
+    const fields = [
+      h('div.field', {}, h('label', { text: 'Type' }), typeGrid, h('div.hint', { text: JOINT_TYPES[j.type].desc })),
+      pick('a', 'First component', '#ff7a1a'),
+      pick('b', 'Second component (moves)', '#4f8cff'),
+    ];
+    if (j.type !== 'slider' && j.type !== 'cylindrical') fields.push(this.exprField({ key: 'j-offset', label: 'Offset (gap)', value: j.offset, unit: 'mm', drag: true, onInput: (v) => set({ offset: v }) }));
+    if (j.type === 'rigid' || j.type === 'slider') fields.push(this.exprField({ key: 'j-angle', label: 'Angle', value: j.angle, unit: 'deg', drag: true, onInput: (v) => set({ angle: v }) }));
+    fields.push(this.toggle({ label: 'Flip direction', value: j.flip, onChange: (v) => set({ flip: v }) }));
+    const err = asm.jointError();
+    const st = asm.previewStatus;
+    if (err && j.a && j.b) fields.push(h('div.banner.err', { html: icon('error') }, h('div', { text: err })));
+    else if (!err && st) fields.push(h('div.hint', { html: st.dof ? `Assembly has <b style="color:var(--text)">${st.dof}</b> degree${st.dof === 1 ? '' : 's'} of freedom left — drag parts to test the motion after OK.` : 'Assembly is fully constrained.' }));
+    const nameInput = h('input.doc-name', { value: j.name, 'data-key': '__jname', spellcheck: false, 'aria-label': 'Joint name', style: { width: '100%' } });
+    nameInput.addEventListener('change', () => { j.name = nameInput.value || j.name; });
+    nameInput.addEventListener('keydown', (e) => e.stopPropagation());
+    return h('div.insp', {}, this.head('joint', nameInput, c.editId ? 'Editing joint' : 'New joint'),
+      h('div.insp-body', {}, ...fields),
+      h('div.insp-foot', {}, h('button.btn', { text: 'Cancel', on: { click: () => app.cancelCommand() } }),
+        h('button.btn.primary.grow', { html: icon('check'), disabled: !!err, on: { click: () => app.okCommand() } }, h('span', { text: 'OK' }), h('kbd', { text: 'Enter' }))));
+  }
+
+  renderAssembly() {
+    const app = this.app, asm = app.asm, doc = app.doc;
+    if (app.selectedJoint) {
+      const j = doc.joints.find((x) => x.id === app.selectedJoint);
+      if (j) {
+        const failing = asm.status.failing?.has(j.id);
+        return h('div.insp', {}, this.head(JOINT_TYPES[j.type].icon, h('div.insp-title', { text: j.name }), `${JOINT_TYPES[j.type].label} joint`),
+          h('div.insp-body', {},
+            failing ? h('div.banner.err', { html: icon('error') }, h('div', { text: 'This joint can’t be satisfied with the others — edit or delete one.' })) : null,
+            h('dl.stats', {},
+              h('dt', { text: 'Connects' }), h('dd', { text: `${asm.comp(j.a.comp)?.name} → ${asm.comp(j.b.comp)?.name}` }),
+              h('dt', { text: 'Offset' }), h('dd', { text: j.offset }), h('dt', { text: 'Angle' }), h('dd', { text: j.angle }),
+              h('dt', { text: 'Status' }), h('dd', { text: j.suppressed ? 'Suppressed' : failing ? 'Conflict' : 'OK' })),
+            h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } },
+              h('button.btn', { html: icon('edit'), on: { click: () => asm.startJoint(j.id) } }, h('span', { text: 'Edit' })),
+              h('button.btn', { html: icon('suppress'), on: { click: () => asm.toggleSuppressJoint(j.id) } }, h('span', { text: j.suppressed ? 'Unsuppress' : 'Suppress' })),
+              h('button.btn.danger', { html: icon('trash'), on: { click: () => asm.deleteJoint(j.id) } }, h('span', { text: 'Delete' })))));
+      }
+    }
+    const ids = [...app.selection].filter((id) => asm.comp(id));
+    if (ids.length > 1) {
+      return h('div.insp', {}, this.head('assembly', h('div.insp-title', { text: `${ids.length} components` }), 'Selection'),
+        h('div.insp-body', {}, h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } },
+          h('button.btn', { html: icon('ground'), on: { click: () => asm.toggleGround(ids) } }, h('span', { text: 'Ground' })),
+          h('button.btn.danger', { html: icon('remove'), on: { click: () => asm.removeComponents(ids) } }, h('span', { text: 'Remove' })))));
+    }
+    if (ids.length === 1) return this.renderComponent(asm.comp(ids[0]));
+    const st = asm.status;
+    const body = h('div.insp-body', {},
+      doc.components.length >= 2 && doc.joints.length
+        ? (st.failing?.size
+          ? h('div.banner.err', { html: icon('error') }, h('div', { text: `${st.failing.size} joint${st.failing.size > 1 ? 's' : ''} can’t be satisfied (shown in red in the browser).` }))
+          : h('div.hint', { html: st.dof ? `<b style="color:var(--text)">${st.dof}</b> degree${st.dof === 1 ? '' : 's'} of freedom — drag a part to move it along its joints.` : 'Fully constrained — every part is locked in place.' }))
+        : null,
+      h('div.card', {}, h('h3', { text: 'Build an assembly' }),
+        h('ol.steps', {},
+          h('li', { html: '<span><b>Insert</b> parts from My designs. The first one is grounded (fixed).</span>' }),
+          h('li', { html: '<span><b>Joint</b>: click a point on one part, then on another — faces, circular edges (centers) or straight edges.</span>' }),
+          h('li', { html: '<span>Pick the motion: <b>Rigid</b>, <b>Revolute</b> (hinge), <b>Slider</b>, <b>Cylindrical</b>, <b>Planar</b> or <b>Ball</b>.</span>' }),
+          h('li', { html: '<span><b>Drag</b> parts to see them move. Edit a part and the assembly updates.</span>' }))),
+      h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } },
+        h('button.btn.primary', { html: icon('insert'), on: { click: () => this.ui.openLibrary('insert') } }, h('span', { text: 'Insert part' })),
+        h('button.btn', { html: icon('joint'), on: { click: () => asm.startJoint() } }, h('span', { text: 'Joint' }))),
+      doc.components.length ? null : h('button.btn', { html: icon('sparkle'), on: { click: () => app.loadExampleAssembly() } }, h('span', { text: 'Open the example hinge assembly' })));
+    return h('div.insp', {}, this.head('assembly', h('div.insp-title', { text: doc.name }), `${doc.components.length} components · ${doc.joints.length} joints`,
+      h('button.icon-btn', { html: icon('panelRight'), title: 'Collapse panel', 'aria-label': 'Collapse inspector', on: { click: () => this.ui.togglePanel('right') } })), body);
+  }
+
+  renderComponent(c) {
+    const app = this.app, asm = app.asm;
+    const part = asm.parts[c.part];
+    const vol = part ? part.bodies.reduce((s, b) => s + b.volume, 0) : 0;
+    const nameInput = h('input.doc-name', { value: c.name, spellcheck: false, 'data-key': '__cname', 'aria-label': 'Component name', style: { width: '100%' } });
+    nameInput.addEventListener('change', () => asm.setComponent(c.id, { name: nameInput.value.trim() || c.name }, 'Rename component'));
+    nameInput.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') nameInput.blur(); });
+    const jointed = app.doc.joints.some((j) => !j.suppressed && (j.a.comp === c.id || j.b.comp === c.id));
+    const eul = qToEuler(c.q);
+    const posField = (k, i) => this.exprField({
+      key: `cp-${k}`, label: k.toUpperCase(), value: fmt(c.t[i], 3), unit: 'mm', half: true,
+      onCommit: (v) => { const r = tryEvaluate(v, app.scope); if (!r.error) { const t = c.t.slice(); t[i] = r.value; asm.setComponent(c.id, { t }, 'Move component'); } },
+    });
+    const rotField = (k, i) => this.exprField({
+      key: `cr-${k}`, label: `R${k}`, value: fmt(eul[i], 2), unit: 'deg', half: true,
+      onCommit: (v) => { const r = tryEvaluate(v, app.scope); if (!r.error) { const e = eul.slice(); e[i] = r.value; asm.setComponent(c.id, { q: qFromEuler(e) }, 'Rotate component'); } },
+    });
+    const colorBtns = BODY_COLORS.map((col) => h(`button${col === c.color ? '.on' : ''}`, { style: { background: col }, title: col, 'aria-label': `Colour ${col}`, on: { click: () => asm.setComponent(c.id, { color: col }, 'Change colour') } }));
+    return h('div.insp', {}, this.head(c.grounded ? 'ground' : 'body', nameInput, `${asm.partName(c.part)}${c.grounded ? ' · grounded' : ''}`),
+      h('div.insp-body', {},
+        this.toggle({ label: 'Grounded (fixed in place)', value: !!c.grounded, onChange: () => asm.toggleGround([c.id]) }),
+        h('div.field-heading', { text: 'Position' }),
+        h('div.field-row', {}, posField('x', 0), posField('y', 1), posField('z', 2)),
+        h('div.field-row', {}, rotField('X', 0), rotField('Y', 1), rotField('Z', 2)),
+        jointed && !c.grounded ? h('div.hint', { text: 'Joints control this part — typed positions get pulled back onto its joints.' }) : null,
+        h('div.field', {}, h('label', { text: 'Appearance' }), h('div.colors', {}, ...colorBtns,
+          h('button', { title: 'Use the part’s own colours', 'aria-label': 'Reset colour', style: { background: 'var(--panel)', border: '1px dashed var(--border-strong)' }, on: { click: () => asm.setComponent(c.id, { color: undefined }, 'Reset colour') } }))),
+        h('dl.stats', {}, h('dt', { text: 'Volume' }), h('dd', { text: volume(vol) }), h('dt', { text: 'Bodies' }), h('dd', { text: part ? part.bodies.length : '—' })),
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } },
+          h('button.btn', { html: icon('edit'), on: { click: () => asm.editPart(c.id) } }, h('span', { text: 'Edit part' })),
+          h('button.btn', { html: icon('joint'), on: { click: () => asm.startJoint() } }, h('span', { text: 'Joint' })),
+          h('button.btn', { html: icon('insert'), on: { click: () => asm.insertPart(c.part) } }, h('span', { text: 'Duplicate' })),
+          h('button.btn.danger', { html: icon('remove'), on: { click: () => asm.removeComponents([c.id]) } }, h('span', { text: 'Remove' })))));
   }
 
   renderFeature() {

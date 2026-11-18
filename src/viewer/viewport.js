@@ -69,7 +69,8 @@ export class Viewport {
     this.planeGroup = new THREE.Group();
     this.measureGroup = new THREE.Group();
     this.dimGroup = new THREE.Group();
-    this.scene.add(this.bodyGroup, this.sketchGroup, this.previewGroup, this.highlightGroup, this.planeGroup, this.measureGroup, this.dimGroup);
+    this.markerGroup = new THREE.Group();
+    this.scene.add(this.bodyGroup, this.sketchGroup, this.previewGroup, this.highlightGroup, this.planeGroup, this.measureGroup, this.dimGroup, this.markerGroup);
     this.dims = { frame: null, list: [], onEdit: null, labels: [], ps: 0, key: '' };
     this.dimEditing = null;
     this._buildOriginPlanes();
@@ -306,10 +307,16 @@ export class Viewport {
     this.bodyGroup.add(mesh, edges);
     // group start lookup for triangle -> face
     const groupStarts = data.groups.map((g2) => g2[0]);
-    return { id, data, mesh, edges, cap, groupStarts, faceCache: new Map() };
+    return { id, data, mesh, edges, cap, groupStarts, faceCache: new Map(), matrix: new THREE.Matrix4(), identity: true };
   }
 
   _styleBody(entry, b) {
+    if (b.matrix) {
+      // component placement (assemblies): instances share mesh data but have their own pose
+      entry.matrix.fromArray(b.matrix);
+      entry.identity = entry.matrix.equals(new THREE.Matrix4());
+      for (const o of [entry.mesh, entry.edges]) { o.matrixAutoUpdate = false; o.matrix.copy(entry.matrix); o.updateMatrixWorld(true); }
+    }
     entry.mesh.material.color.set(b.color);
     entry.visible = b.visible !== false;
     entry.mesh.visible = entry.visible;
@@ -426,12 +433,12 @@ export class Viewport {
     return l;
   }
 
+  /** Edge polyline as world-space segment pairs (applies the body's placement). */
   _edgeSegments(entry, ei) {
     const e = entry.data.edgeInfo[ei], P = entry.data.edgePts, out = [];
-    for (let i = 0; i < e.count - 1; i++) {
-      const a = (e.start + i) * 3, b = (e.start + i + 1) * 3;
-      out.push(P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2]);
-    }
+    const v = new THREE.Vector3();
+    const push = (k) => { v.set(P[k], P[k + 1], P[k + 2]); if (!entry.identity) v.applyMatrix4(entry.matrix); out.push(v.x, v.y, v.z); };
+    for (let i = 0; i < e.count - 1; i++) { push((e.start + i) * 3); push((e.start + i + 1) * 3); }
     return out;
   }
 
@@ -443,7 +450,47 @@ export class Viewport {
     const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
     m.userData.noPick = true;
     m.renderOrder = 5;
+    if (!entry.identity) { m.matrixAutoUpdate = false; m.matrix.copy(entry.matrix); }
     return m;
+  }
+
+  /** Body-local → world for a point (or a direction when dir = true). */
+  toWorldOf(bodyId, p, dir = false) {
+    const e = this.bodies.get(bodyId);
+    const v = new THREE.Vector3(...p);
+    if (e && !e.identity) { if (dir) v.transformDirection(e.matrix); else v.applyMatrix4(e.matrix); }
+    return v.toArray();
+  }
+
+  /** Center, axis and radius of a circular edge (body-local), from three of its points. */
+  circleOf(entry, ei) {
+    const e = entry.data.edgeInfo[ei], P = entry.data.edgePts;
+    if (e.type !== 'CIRCLE' || e.count < 3) return null;
+    const pt = (i) => { const k = (e.start + i) * 3; return new THREE.Vector3(P[k], P[k + 1], P[k + 2]); };
+    const a = pt(0), b = pt(Math.floor((e.count - 1) / 3)), c = pt(Math.floor((2 * (e.count - 1)) / 3));
+    const ab = b.clone().sub(a), ac = c.clone().sub(a);
+    const n = ab.clone().cross(ac);
+    const n2 = n.lengthSq();
+    if (n2 < 1e-12) return null;
+    const center = a.clone().add(n.clone().cross(ab).multiplyScalar(ac.lengthSq()).add(ac.clone().cross(n).multiplyScalar(ab.lengthSq())).divideScalar(2 * n2));
+    return { c: center.toArray(), axis: n.normalize().toArray(), r: center.distanceTo(a) };
+  }
+
+  /** Joint frame markers: [{ p, z, color }] in world space. */
+  setMarkers(list = []) {
+    for (const o of this.markerGroup.children) { o.geometry?.dispose(); o.material?.dispose(); }
+    this.markerGroup.clear();
+    const s = this.pixelSize() * 34;
+    for (const m of list) {
+      const p = new THREE.Vector3(...m.p), z = new THREE.Vector3(...m.z).normalize();
+      const ring = new THREE.Mesh(new THREE.RingGeometry(s * 0.32, s * 0.42, 32), new THREE.MeshBasicMaterial({ color: m.color, side: THREE.DoubleSide, depthTest: false, transparent: true }));
+      ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), z);
+      ring.position.copy(p);
+      const axis = new THREE.Line(new THREE.BufferGeometry().setFromPoints([p, p.clone().addScaledVector(z, s)]), new THREE.LineBasicMaterial({ color: m.color, depthTest: false }));
+      const dot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), new THREE.PointsMaterial({ color: m.color, size: 8, sizeAttenuation: false, depthTest: false }));
+      for (const o of [ring, axis, dot]) { o.renderOrder = 13; o.userData.noPick = true; this.markerGroup.add(o); }
+    }
+    this.dirty = true;
   }
 
   _refreshHighlights() {
@@ -894,6 +941,7 @@ export class Viewport {
         case 'faces': return k === 'face';
         case 'bodies': case 'body': return k === 'body';
         case 'measure': return k === 'edge' || k === 'face' || k === 'vertex';
+        case 'joint': return k === 'edge' || k === 'planarFace';
         default: return false;
       }
     };
@@ -943,6 +991,7 @@ export class Viewport {
         for (let i = 0; i < e.count - 1; i++) {
           const ia = (e.start + i) * 3, ib = ia + 3;
           a.set(P[ia], P[ia + 1], P[ia + 2]); b.set(P[ib], P[ib + 1], P[ib + 2]);
+          if (!entry.identity) { a.applyMatrix4(entry.matrix); b.applyMatrix4(entry.matrix); }
           const wa = a.clone(), wb = b.clone();
           a.project(this.camera); b.project(this.camera);
           if (a.z > 1 || b.z > 1) continue;

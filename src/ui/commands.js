@@ -9,10 +9,10 @@ export function buildCommands(app, ui) {
   const feat = (type, extra = {}) => ({
     id: type, label: FEATURES[type].label, icon: FEATURES[type].icon, group: FEATURES[type].group === 'create' ? 'Create' : 'Modify',
     key: FEATURES[type].shortcut && type !== 'sketch' ? FEATURES[type].shortcut : undefined,
-    run: () => app.startCommand(type), when: () => true, active: () => app.cmd && app.cmd.type === type, ...extra,
+    run: () => app.startCommand(type), when: () => !app.isAssembly, active: () => app.cmd && app.cmd.type === type, ...extra,
   });
   const cmds = [
-    { id: 'sketch', label: 'Sketch', icon: 'sketch', group: 'Create', desc: 'Pick a plane or flat face, then draw 2D profiles', run: () => app.startSketchFlow(), when: model, active: () => app.cmd && app.cmd.type === 'sketchPlane' },
+    { id: 'sketch', label: 'Sketch', icon: 'sketch', group: 'Create', desc: 'Pick a plane or flat face, then draw 2D profiles', run: () => app.startSketchFlow(), when: () => model() && !app.isAssembly, active: () => app.cmd && app.cmd.type === 'sketchPlane' },
     feat('extrude', { desc: 'Push a closed sketch profile into a solid, or cut with it' }),
     feat('revolve', { desc: 'Spin a profile around an axis' }),
     feat('box', { desc: 'Solid box primitive' }),
@@ -51,9 +51,18 @@ export function buildCommands(app, ui) {
     { id: 'sk-delete', label: 'Delete', icon: 'trash', group: 'Sketch', key: 'Del', desc: 'Delete selected sketch entities', run: () => app.sketcher.deleteSelected(), when: sketch },
     { id: 'finish-sketch', label: 'Finish sketch', icon: 'check', group: 'Sketch', key: 'Ctrl+Enter', desc: 'Leave the sketch and return to 3D modeling', run: () => app.finishSketch(), when: sketch },
 
+    // assembly
+    { id: 'asm-insert', label: 'Insert part', short: 'Insert', icon: 'insert', group: 'Assemble', key: 'Shift+I', desc: 'Add a part from My designs as a component', run: () => ui.openLibrary('insert'), when: () => app.isAssembly },
+    { id: 'asm-joint', label: 'Joint', icon: 'joint', group: 'Assemble', key: 'J', desc: 'Snap a point on one component to a point on another (rigid, hinge, slider…)', run: () => app.asm.startJoint(), when: () => app.isAssembly, active: () => app.cmd && app.cmd.type === 'joint' },
+    { id: 'asm-ground', label: 'Ground / Unground', short: 'Ground', icon: 'ground', group: 'Assemble', key: 'G', desc: 'Fix the selected components in place', run: () => (app.selection.size ? app.asm.toggleGround([...app.selection]) : null), when: () => app.isAssembly },
+    { id: 'asm-edit-part', label: 'Edit part', short: 'Edit part', icon: 'edit', group: 'Assemble', desc: 'Open the selected component’s part to change it', run: () => (app.selection.size === 1 ? app.asm.editPart([...app.selection][0]) : null), when: () => app.isAssembly },
+
     // file
-    { id: 'new', label: 'New design', icon: 'file', group: 'File', run: () => app.newDocument(), when: () => true },
-    { id: 'open', label: 'Open design…', icon: 'open', group: 'File', key: 'Ctrl+O', run: () => ui.openFilePicker(), when: () => true },
+    { id: 'new', label: 'New part', icon: 'body', group: 'File', run: () => app.newDocument(), when: () => true },
+    { id: 'new-assembly', label: 'New assembly', icon: 'assembly', group: 'File', run: () => app.newAssemblyDoc(), when: () => true },
+    { id: 'my-designs', label: 'My designs…', icon: 'folder', group: 'File', key: 'Ctrl+O', run: () => ui.openLibrary('open'), when: () => true },
+    { id: 'open', label: 'Open file…', icon: 'open', group: 'File', run: () => ui.openFilePicker(), when: () => true },
+    { id: 'example-assembly', label: 'Open example: hinge assembly', icon: 'assembly', group: 'File', run: () => app.loadExampleAssembly(), when: () => true },
     { id: 'save', label: 'Save design (.f720.json)', icon: 'save', group: 'File', key: 'Ctrl+S', run: () => app.saveFile(), when: () => true },
     { id: 'export-step', label: 'Export STEP', icon: 'download', group: 'File', desc: 'For other CAD tools', run: () => app.exportFile('step'), when: () => true },
     { id: 'export-stl', label: 'Export STL', icon: 'download', group: 'File', desc: 'For 3D printing', run: () => app.exportFile('stl'), when: () => true },
@@ -78,6 +87,11 @@ export function buildCommands(app, ui) {
 export const MODEL_TOOLBAR = [
   { label: 'Create', items: ['sketch', 'extrude', 'revolve', { menu: 'Primitive', icon: 'box', items: ['box', 'cylinder', 'sphere', 'torus'] }] },
   { label: 'Modify', items: ['fillet', 'chamfer', 'shell', 'combine', 'move', 'mirror', 'pattern'] },
+  { label: 'Inspect', items: ['measure', 'section', 'params'] },
+];
+
+export const ASSEMBLY_TOOLBAR = [
+  { label: 'Assemble', items: ['asm-insert', 'asm-joint', 'asm-ground', 'asm-edit-part'] },
   { label: 'Inspect', items: ['measure', 'section', 'params'] },
 ];
 
