@@ -358,9 +358,17 @@ export class Inspector {
       const def = sk.ctype === 'hv' ? HV : CONSTRAINTS[sk.ctype];
       body.append(h('div.card', {}, h('h3', { text: def.label }), h('p', { text: def.desc }),
         h('p', { style: { marginTop: '6px' }, text: sk.picks.length ? `${sk.picks.length} picked — keep clicking. Esc clears.` : 'Click geometry in the view. Selected lines/circles are used straight away.' })));
+    } else if (sk.modifying) {
+      const valueField = sk.tool === 'fillet' || sk.tool === 'offset'
+        ? this.exprField({
+          key: `mod-${sk.tool}`, label: sk.tool === 'fillet' ? 'Fillet radius' : 'Offset distance', value: sk.modText[sk.tool], unit: 'mm', drag: true,
+          onInput: (v) => { sk.modText[sk.tool] = v; sk._refreshModify(); },
+        })
+        : null;
+      body.append(h('div.card', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, h('h3', { text: tool.label, style: { margin: 0 } }), h('p', { text: tool.desc }), valueField));
     } else if (sk.tool !== 'select') {
       body.append(h('div.card', {}, h('h3', { text: tool.label }), h('p', { text: tool.desc }),
-        sk.tool === 'dimension' ? null : h('p', { style: { marginTop: '6px' }, html: 'Type a number while drawing to set a dimension, <kbd>Tab</kbd> to switch fields, <kbd>Enter</kbd> to place. Snapping to points adds constraints automatically.' })));
+        sk.tool === 'dimension' ? null : h('p', { style: { marginTop: '6px' }, html: `Type a number while drawing to set a dimension, <kbd>Tab</kbd> to switch fields, <kbd>Enter</kbd> to place. Snapping to points adds constraints automatically.${sk.tool === 'line' ? ' Press <kbd>A</kbd> mid-chain for tangent arcs.' : ''}` })));
     }
     body.append(
       this.toggle({ label: 'Show dimensions', value: sk.showDims, onChange: () => sk.toggleDims() }),

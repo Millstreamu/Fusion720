@@ -56,8 +56,9 @@ designs autosave in their own browser; nothing is uploaded anywhere. The kernel 
 
 | Area | Features |
 | --- | --- |
-| **Sketching** | Line / polyline (click the first point to close), 2-point and center rectangles, circles, polygons, slots, construction geometry, grid + point snapping with horizontal/vertical inference, **type-to-dimension** while drawing (digits, `Tab`, `Enter` — parameter names work too), editable dimensions as expressions |
-| **Constraints** | Built-in geometric solver: Coincident, Horizontal/Vertical, Parallel, Perpendicular, Tangent, Equal, Concentric, Midpoint, Collinear, Symmetric, Fix. Driving dimensions (length, distance, point–line distance, angle, diameter, position) via the Dimension tool or by clicking any dimension. Snapping and typed values add constraints automatically. Geometry is colour-coded (blue = free, white = fully defined, green = fixed, red = conflict), the inspector shows remaining degrees of freedom, conflicting constraints are refused, and dragging re-solves live |
+| **Sketching** | Line chains with **tangent arcs** (press `A` mid-chain), **3-point arcs**, 2-point and center rectangles, circles, polygons, slots, construction geometry, grid + point snapping with horizontal/vertical inference, **type-to-dimension** while drawing (digits, `Tab`, `Enter` — parameter names work too), editable dimensions as expressions |
+| **Sketch editing** | **Fillet** corners (rectangles/polygons convert automatically, keeping their dimensions as constraints), **Trim** to the nearest crossings, **Extend** lines to the next curve, **Offset** shapes and chains (outward / `Shift` inward), **Project** model edges into the sketch. Separate lines and arcs that meet end-to-end form profiles, so trimmed shapes extrude |
+| **Constraints** | Built-in geometric solver: Coincident, Horizontal/Vertical, Parallel, Perpendicular, Tangent, Equal, Concentric, Midpoint, Collinear, Symmetric, Fix. Driving dimensions (length, distance, point–line distance, angle, radius, diameter, position) via the Dimension tool or by clicking any dimension. Snapping and typed values add constraints automatically. Geometry is colour-coded (blue = free, white = fully defined, green = fixed, red = conflict), the inspector shows remaining degrees of freedom, conflicting constraints are refused, and dragging re-solves live |
 | **Profiles** | Automatic region detection — nested shapes become holes; click shaded regions to pick them |
 | **Solids** | Extrude (one side / symmetric / two sides; new, join, cut, intersect), Revolve (sketch axes or any sketch line), Box, Cylinder, Sphere, Torus |
 | **Modify** | Fillet, Chamfer, Shell, Combine, Move / Copy (translate + rotate), Mirror, Rectangular & circular Pattern, Remove |
@@ -79,8 +80,9 @@ designs autosave in their own browser; nothing is uploaded anywhere. The kernel 
 | Zoom | Wheel (zooms to the cursor) |
 | Search every command | `S` or `Ctrl K` |
 | Extrude / Revolve / Fillet / Move / Box / Measure | `E` / `V` / `F` / `M` / `B` / `I` |
-| Sketch tools | `L` line, `R` rectangle, `Shift R` center rectangle, `C` circle, `P` polygon, `O` slot, `X` construction |
-| Sketch constraints | `D` dimension, `H` horizontal/vertical, `T` tangent; click a glyph to select it, right-click a glyph or dimension to delete it |
+| Sketch tools | `L` line (`A` toggles tangent arcs mid-chain), `A` 3-point arc, `R` rectangle, `Shift R` center rectangle, `C` circle, `X` construction |
+| Sketch editing | `F` fillet, `T` trim, `E` extend, `O` offset, `P` project — type a number to set the fillet radius / offset distance |
+| Sketch constraints | `D` dimension, `H` horizontal/vertical; click a glyph to select it, right-click a glyph or dimension to delete it |
 | Assemblies | `Shift I` insert part, `J` joint, `G` ground/unground, drag a part to move it |
 | My designs | `Ctrl O` |
 | Finish sketch | `Ctrl Enter` |
@@ -100,7 +102,8 @@ src/main.js             bootstrap: wires viewport, kernel, panels, shortcuts
 src/app.js              controller: document, undo/redo, commands, picking, rebuild orchestration
 src/model/              pure data + math (shared with the worker)
   expr.js               safe expression evaluator with units and parameters
-  profiles.js           sketch entities, outlines, profile/region detection
+  profiles.js           sketch entities, outlines, profile/region detection (incl. joined loops)
+  sketchgeom.js         2D arcs (bulges), intersections, trim, extend, offset, fillet
   constraints.js        sketch constraint solver (Levenberg–Marquardt) + degrees-of-freedom analysis
   assembly.js           assembly model, quaternion maths and the joint solver
   library.js            "My designs" storage (one localStorage entry per design)
@@ -136,7 +139,7 @@ See `src/model/example.js` for a complete, readable example.
 This is a strong foundation, not feature parity with a commercial CAD suite (yet):
 
 - The sketch solver is a numeric least-squares solver: robust for typical part sketches (dozens of entities), but not tuned for very large sketches, and rectangles stay axis-aligned (use a closed line chain for rotated boxes).
-- No arcs/splines inside polylines, no sketch fillets, no projecting edges into sketches.
+- No splines or ellipses in sketches yet. Projected edges are copies — they don't update if the model changes. Profiles from separate curves need a simple loop (each joint shared by exactly two curves).
 - Sketches on faces are placed at the face's position when created; they don't follow the face if it moves.
 - Edge/face references use smart heuristics, not full topological naming, so big topology changes can still break a fillet (it shows a clear error and you can re-pick the edges).
 - Assemblies: no sub-assemblies (assemblies inside assemblies), no joint limits, motion studies or interference checking yet.
@@ -146,7 +149,7 @@ This is a strong foundation, not feature parity with a commercial CAD suite (yet
 
 ## Roadmap ideas
 
-Arcs + sketch fillets, project/offset in sketches, hole & thread
+Splines, linked projections, hole & thread
 features, sweep and loft UI, press-pull on faces, sub-assemblies, joint limits and motion studies, 2D drawings, fully offline
 build, and PWA install.
 

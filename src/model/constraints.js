@@ -7,6 +7,7 @@
 // dimensions) and fixed entities never move.
 import { evaluate, fmt } from './expr.js';
 import { NUMERIC_FIELDS, evalEntity, polygonVerts, slotFrame } from './profiles.js';
+import { arcFromBulge } from './sketchgeom.js';
 
 export const isLiteral = (s) => typeof s === 'number' || /^\s*-?\d*\.?\d+(e[+-]?\d+)?\s*(mm)?\s*$/i.test(String(s));
 
@@ -51,7 +52,15 @@ export function elementsOf(e) {
     case 'polyline': {
       const n = e.pts.length;
       e.pts.forEach((p, i) => { P[`v${i}`] = p; });
-      for (let i = 0; i < (e.closed ? n : n - 1); i++) L[`s${i}`] = [e.pts[i], e.pts[(i + 1) % n]];
+      for (let i = 0; i < (e.closed ? n : n - 1); i++) {
+        const a = e.pts[i], b = e.pts[(i + 1) % n], bu = (e.bulges && e.bulges[i]) || 0;
+        if (Math.abs(bu) > 1e-12) {
+          // arc segment: its circle (for tangent / equal / concentric / radius) and its center point
+          const arc = arcFromBulge(a, b, bu);
+          C[`a${i}`] = { c: arc.c, r: arc.r };
+          P[`ac${i}`] = arc.c;
+        } else L[`s${i}`] = [a, b];
+      }
       break;
     }
     default: break;
@@ -167,6 +176,11 @@ export const CONSTRAINTS = {
     },
   },
   // ---- driving dimensions (value is an expression)
+  radius: {
+    label: 'Radius', dim: true, check: (k) => progressive(k, ['circle']),
+    measure: ([c]) => ({ value: c.r }),
+    res: ([c], k) => [c.r - k._v],
+  },
   length: {
     label: 'Length', dim: true, check: (k) => progressive(k, ['line']),
     measure: ([l]) => ({ value: len(sub(l.b, l.a)) }),
@@ -208,7 +222,12 @@ export const HV = { label: 'Horizontal / Vertical', icon: 'cHV', desc: 'Make a l
 
 // ------------------------------------------------------------------ variables
 function fieldsOf(s) {
-  if (s.type === 'polyline') return s.pts.flatMap((p, i) => [[`pts.${i}.0`, p[0]], [`pts.${i}.1`, p[1]]]);
+  if (s.type === 'polyline') {
+    const f = s.pts.flatMap((p, i) => [[`pts.${i}.0`, p[0]], [`pts.${i}.1`, p[1]]]);
+    // only existing arcs can change curvature — a straight segment never turns into an arc by itself
+    (s.bulges || []).forEach((b, i) => { if (isLiteral(b) && Math.abs(parseFloat(b)) > 1e-12) f.push([`bulges.${i}`, b]); });
+    return f;
+  }
   return (NUMERIC_FIELDS[s.type] || []).filter((k) => k !== 'n').map((k) => [k, s[k]]);
 }
 
@@ -240,7 +259,14 @@ function buildVars(stored, evald) {
     } else if (s.type === 'polyline') {
       const idx = [];
       e.pts.forEach((p, i) => [0, 1].forEach((j) => { if (free.has(`pts.${i}.${j}`)) idx.push([i, j, push(ei, `pts.${i}.${j}`, p[j])]); }));
-      decoders.push((v) => { const o = { ...e, pts: e.pts.map((p) => p.slice()) }; for (const [i, j, k] of idx) o.pts[i][j] = v[k]; return o; });
+      const bidx = [];
+      (e.bulges || []).forEach((b, i) => { if (free.has(`bulges.${i}`)) bidx.push([i, push(ei, `bulges.${i}`, b)]); });
+      decoders.push((v) => {
+        const o = { ...e, pts: e.pts.map((p) => p.slice()), bulges: (e.bulges || []).slice() };
+        for (const [i, j, k] of idx) o.pts[i][j] = v[k];
+        for (const [i, k] of bidx) o.bulges[i] = v[k];
+        return o;
+      });
     } else {
       const centerish = s.type === 'polygon' ? 8 : 1; // polygon: prefer resizing/rotating over moving
       const idx = [];
@@ -452,6 +478,10 @@ export function solveSketch(sketch, scope, opts = {}) {
         const [, pi, pj] = k.split('.');
         if (o.pts === s.pts) o.pts = s.pts.map((p) => p.slice());
         o.pts[+pi][+pj] = fmt(d.pts[+pi][+pj], 6);
+      } else if (k.startsWith('bulges.')) {
+        const bi = +k.split('.')[1];
+        if (o.bulges === s.bulges) o.bulges = s.bulges.slice();
+        o.bulges[bi] = fmt(d.bulges[bi], 9);
       } else o[k] = fmt(d[k], 6);
     }
     return o;

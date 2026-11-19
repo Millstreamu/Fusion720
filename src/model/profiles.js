@@ -1,6 +1,7 @@
 // Sketch entity evaluation, outlines and profile (region) detection.
 // Shared by the UI thread and the geometry worker — no DOM or three.js here.
 import { evaluate } from './expr.js';
+import { primsOf, primsOutline, reversePrim } from './sketchgeom.js';
 
 export const NUMERIC_FIELDS = {
   line: ['x1', 'y1', 'x2', 'y2'],
@@ -24,7 +25,11 @@ export function evalEntity(ent, scope) {
   const out = { ...ent };
   try {
     for (const f of NUMERIC_FIELDS[ent.type] || []) out[f] = evaluate(ent[f], scope);
-    if (ent.type === 'polyline') out.pts = ent.pts.map(([x, y]) => [evaluate(x, scope), evaluate(y, scope)]);
+    if (ent.type === 'polyline') {
+      out.pts = ent.pts.map(([x, y]) => [evaluate(x, scope), evaluate(y, scope)]);
+      const segs = ent.closed ? ent.pts.length : Math.max(0, ent.pts.length - 1);
+      out.bulges = Array.from({ length: segs }, (_, i) => (ent.bulges && ent.bulges[i] != null ? evaluate(ent.bulges[i], scope) : 0));
+    }
     if (ent.type === 'polygon') out.n = Math.max(3, Math.round(out.n));
     out.error = null;
   } catch (e) {
@@ -39,9 +44,16 @@ export function isClosed(e) {
   if (e.type === 'circle') return e.d > 1e-9;
   if (e.type === 'polygon') return e.r > 1e-9;
   if (e.type === 'slot') return e.w > 1e-9 && Math.hypot(e.x2 - e.x1, e.y2 - e.y1) > 1e-9;
-  if (e.type === 'polyline') return e.closed && cleanPts(e.pts).length >= 3;
+  if (e.type === 'polyline') {
+    if (!e.closed) return false;
+    const { prims } = primsOf(e);
+    return prims.length >= 3 || (prims.length >= 1 && prims.some((p) => p.k === 'A'));
+  }
   return false;
 }
+
+/** Lines, open polylines and arcs: curves that can join end-to-end into a closed loop. */
+export const isOpenCurve = (e) => !e.error && !e.construction && (e.type === 'line' || e.type === 'arc' || (e.type === 'polyline' && !e.closed));
 
 export function cleanPts(pts) {
   const out = [];
@@ -88,7 +100,7 @@ export function outline(e) {
     case 'rect': return [[e.x, e.y], [e.x + e.w, e.y], [e.x + e.w, e.y + e.h], [e.x, e.y + e.h]];
     case 'circle': return arcPts(e.cx, e.cy, e.d / 2, 0, Math.PI * 2, 72).slice(0, -1);
     case 'polygon': return polygonVerts(e);
-    case 'polyline': return e.pts.slice();
+    case 'polyline': { const { prims, closed } = primsOf(e); return prims.length ? primsOutline(prims, closed) : e.pts.slice(); }
     case 'arc': return arcPts(e.cx, e.cy, e.r, e.a0 * Math.PI / 180, e.a1 * Math.PI / 180, 48);
     case 'slot': {
       const { px, py, r } = slotFrame(e);
@@ -137,14 +149,73 @@ export function pointInPoly(p, pts) {
 }
 
 /**
- * Detect profiles. Each closed entity defines a region = its outline minus the
- * outlines of closed entities directly nested inside it.
+ * Closed loops made of separate open curves joined end-to-end (e.g. lines and
+ * arcs left after trimming). Only simple chains are used: every joint must
+ * connect exactly two curves. Returns [{ id, ents, prims }].
+ */
+export function findLoops(evaluated) {
+  const curves = evaluated.filter(isOpenCurve).map((e) => ({ e, prims: primsOf(e).prims })).filter((c) => c.prims.length);
+  if (!curves.length) return [];
+  const nodes = [];
+  const node = (p) => {
+    let n = nodes.find((q) => Math.hypot(q.p[0] - p[0], q.p[1] - p[1]) < 1e-5);
+    if (!n) { n = { p, edges: [] }; nodes.push(n); }
+    return n;
+  };
+  const edges = curves.map((c) => {
+    const ed = { c, a: node(c.prims[0].a), b: node(c.prims[c.prims.length - 1].b) };
+    ed.a.edges.push(ed); ed.b.edges.push(ed);
+    return ed;
+  });
+  const seen = new Set();
+  const loops = [];
+  for (const start of edges) {
+    if (seen.has(start)) continue;
+    // collect the connected component
+    const comp = new Set([start]), stack = [start];
+    while (stack.length) {
+      const ed = stack.pop();
+      for (const nd of [ed.a, ed.b]) for (const o of nd.edges) if (!comp.has(o)) { comp.add(o); stack.push(o); }
+    }
+    for (const ed of comp) seen.add(ed);
+    const compNodes = new Set([...comp].flatMap((ed) => [ed.a, ed.b]));
+    if (![...compNodes].every((nd) => nd.edges.length === 2)) continue; // open chain or branching: no single loop
+    // walk the cycle, orienting each curve head-to-tail and snapping joints exactly
+    const prims = [];
+    let ed = start, at = start.a;
+    const used = new Set();
+    for (let guard = 0; guard <= comp.size && !used.has(ed); guard++) {
+      used.add(ed);
+      const forward = ed.a === at;
+      let ps = ed.c.prims.map((p) => ({ ...p }));
+      if (!forward) ps = ps.reverse().map(reversePrim);
+      const end = forward ? ed.b : ed.a;
+      ps[0].a = at.p; ps[ps.length - 1].b = end.p;
+      prims.push(...ps);
+      at = end;
+      ed = end.edges.find((o) => o !== ed) || ed;
+    }
+    if (used.size !== comp.size) continue;
+    const ents = [...comp].map((x) => x.c.e.id).sort();
+    loops.push({ id: `L:${ents.join(',')}`, ents, prims });
+  }
+  return loops;
+}
+
+/**
+ * Detect profiles. Each closed entity, and each loop of joined curves, defines a
+ * region = its outline minus the closed outlines directly nested inside it.
  */
 export function computeRegions(evaluated) {
   const closed = evaluated.filter(isClosed).map((e) => {
     const pts = outline(e);
-    return { id: e.id, ent: e, pts, area: Math.abs(polyArea(pts)), parent: null, children: [] };
+    return { id: e.id, ent: e, src: { type: 'ent', ent: e }, pts, area: Math.abs(polyArea(pts)), parent: null, children: [] };
   });
+  for (const lp of findLoops(evaluated)) {
+    const pts = primsOutline(lp.prims, true);
+    if (pts.length < 3) continue;
+    closed.push({ id: lp.id, ent: null, src: { type: 'loop', prims: lp.prims, ents: lp.ents }, pts, area: Math.abs(polyArea(pts)), parent: null, children: [] });
+  }
   for (const b of closed) {
     let best = null;
     for (const a of closed) {
@@ -161,8 +232,10 @@ export function computeRegions(evaluated) {
     outer: r.pts,
     holes: r.children.map((c) => byId.get(c).pts),
     children: r.children,
+    childSrcs: r.children.map((c) => byId.get(c).src),
     area: r.area - r.children.reduce((s, c) => s + byId.get(c).area, 0),
     ent: r.ent,
+    src: r.src,
   }));
 }
 

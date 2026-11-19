@@ -33,7 +33,7 @@ export function buildCommands(app, ui) {
 
     // sketch mode
     ...Object.entries(SKETCH_TOOLS).map(([id, t]) => ({
-      id: `sk-${id}`, label: t.label, icon: t.icon, group: 'Sketch', key: t.key, desc: t.desc,
+      id: `sk-${id}`, label: t.label, short: t.short, icon: t.icon, group: 'Sketch', key: t.key, desc: t.desc,
       run: () => app.sketcher.setTool(id), when: sketch, active: () => sketch() && app.sketcher.tool === id,
     })),
     { id: 'sk-construction', label: 'Construction', icon: 'construction', group: 'Sketch', key: 'X', desc: 'Toggle construction geometry (not used for profiles)', run: () => app.sketcher.toggleConstruction(), when: sketch, active: () => sketch() && app.sketcher.construction },
@@ -42,7 +42,7 @@ export function buildCommands(app, ui) {
       const def = t === 'hv' ? HV : CONSTRAINTS[t];
       return {
         id: `cn-${t}`, label: def.label, short: { hv: 'H / V', perpendicular: 'Perpend.', coincident: 'Coincid.' }[t], icon: def.icon, group: 'Constrain', desc: def.desc,
-        key: { hv: 'H', tangent: 'T' }[t],
+        key: { hv: 'H' }[t],
         run: () => app.sketcher.setTool('constraint', t), when: sketch,
         active: () => sketch() && app.sketcher.tool === 'constraint' && app.sketcher.ctype === t,
       };
@@ -96,7 +96,8 @@ export const ASSEMBLY_TOOLBAR = [
 ];
 
 export const SKETCH_TOOLBAR = [
-  { label: 'Draw', items: ['sk-select', 'sk-line', { menu: 'Rect', icon: 'rect', items: ['sk-rect', 'sk-centerRect'] }, 'sk-circle', 'sk-polygon', 'sk-slot'] },
+  { label: 'Draw', items: ['sk-select', 'sk-line', 'sk-arc', { menu: 'Rect', icon: 'rect', items: ['sk-rect', 'sk-centerRect'] }, 'sk-circle', { menu: 'More', icon: 'polygon', items: ['sk-polygon', 'sk-slot'] }] },
+  { label: 'Modify', items: ['sk-fillet', 'sk-trim', 'sk-extend', 'sk-offset', 'sk-project'] },
   { label: 'Constrain', items: ['sk-dimension', 'cn-coincident', 'cn-hv', 'cn-parallel', 'cn-perpendicular', 'cn-tangent', 'cn-equal',
     { menu: 'More', icon: 'cConcentric', items: ['cn-concentric', 'cn-midpoint', 'cn-collinear', 'cn-symmetric', 'cn-fix'] }] },
   { label: 'Edit', items: ['sk-construction', 'sk-delete'] },

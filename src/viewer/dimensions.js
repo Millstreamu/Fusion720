@@ -7,6 +7,7 @@
 import { fmt } from '../model/expr.js';
 import { slotFrame } from '../model/profiles.js';
 import { CONSTRAINTS, isLiteral, footOn } from '../model/constraints.js';
+import { arcFromBulge } from '../model/sketchgeom.js';
 
 const num = (v) => fmt(v, 4);
 
@@ -46,10 +47,10 @@ export function sketchDimensions(ctx, sketch, selected = new Set()) {
     const derived = (id, d, existing, create) => {
       if (existing) {
         covered.add(existing.id);
-        dims.push({ entId: e.id, positive: true, side: 1, extra: 0, ...d, id: `c:${existing.id}`, ...labelOf(d.value, existing.value), driving: true, bad: failing.has(existing.id),
+        dims.push({ entId: e.id, positive: true, side: 1, extra: 0, ...d, id: `c:${existing.id}`, ...labelOf(d.value, existing.value, d.prefix || ''), driving: true, bad: failing.has(existing.id),
           edit: (t) => ({ cons: existing.id, value: t }), remove: () => ({ delCons: existing.id }) });
       } else if (sel) {
-        dims.push({ entId: e.id, positive: true, side: 1, extra: 0, ...d, id, ...labelOf(d.value, null), driving: false, edit: (t) => ({ add: { ...create, value: t } }) });
+        dims.push({ entId: e.id, positive: true, side: 1, extra: 0, ...d, id, ...labelOf(d.value, null, d.prefix || ''), driving: false, edit: (t) => ({ add: { ...create, value: t } }) });
       }
     };
     switch (e.type) {
@@ -87,6 +88,13 @@ export function sketchDimensions(ctx, sketch, selected = new Set()) {
           const A = e.pts[i], B = e.pts[(i + 1) % n];
           const L = Math.hypot(B[0] - A[0], B[1] - A[1]);
           if (L < 1e-9) continue;
+          const bu = (e.bulges && e.bulges[i]) || 0;
+          if (Math.abs(bu) > 1e-12) {
+            const arc = arcFromBulge(A, B, bu);
+            const mid = ((arc.a0 + arc.sweep / 2) * 180) / Math.PI;
+            derived(`${e.id}:a${i}`, { kind: 'rad', c: arc.c, r: arc.r, angle: mid, value: arc.r, prefix: 'R' }, consOn('radius', `${e.id}:a${i}`), { type: 'radius', refs: [`${e.id}:a${i}`] });
+            continue;
+          }
           derived(`${e.id}:s${i}`, { kind: 'aligned', a: A, b: B, side: e.closed ? -1 : 1, value: L }, consOn('length', `${e.id}:s${i}`), { type: 'length', refs: [`${e.id}:s${i}`] });
         }
         break;
@@ -130,6 +138,7 @@ export function sketchDimensions(ctx, sketch, selected = new Set()) {
     else if (c.type === 'vdistance') dims.push({ ...base, kind: 'v', a: P(els[0]), b: P(els[1]) });
     else if (c.type === 'pldistance') { const p = P(els[0]); dims.push({ ...base, kind: 'aligned', a: footOn(p, els[1].a, els[1].b), b: p }); }
     else if (c.type === 'angle') dims.push({ ...base, kind: 'angle', l1: [els[0].a, els[0].b], l2: [els[1].a, els[1].b], sgn: c.sgn || 1, text: `${fmt(m.value, 2)}°` });
+    else if (c.type === 'radius') dims.push({ ...base, kind: 'rad', c: els[0].c, r: els[0].r, angle: 45, ...labelOf(m.value, c.value, 'R') });
   }
   return dims;
 }

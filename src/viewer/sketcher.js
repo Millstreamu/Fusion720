@@ -2,10 +2,14 @@
 // automatic constraints, type-to-dimension input, constraint and dimension tools,
 // and solver-driven dragging.
 import { evaluate, fmt } from '../model/expr.js';
-import { outline, isOpenOutline, slotFrame } from '../model/profiles.js';
-import { toWorld } from '../model/geom.js';
+import { outline, isOpenOutline, slotFrame, evalEntity } from '../model/profiles.js';
+import { toWorld, toLocal } from '../model/geom.js';
 import { newId } from '../model/features.js';
 import { CONSTRAINTS, HV, isLiteral, dirAngle } from '../model/constraints.js';
+import {
+  primsOf, primsOutline, endTangent, tangentBulge, bulgeFromThreePoints, arcFromBulge,
+  trimEntity, extendEntity, offsetEntity, filletCorner,
+} from '../model/sketchgeom.js';
 import { toast } from '../ui/dom.js';
 
 const NICE = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
@@ -15,14 +19,21 @@ const num = (v) => fmt(v, 4);
 
 export const SKETCH_TOOLS = {
   select: { label: 'Select', icon: 'cursor', key: 'Esc', desc: 'Select and drag. Drag points to reshape, a circle’s edge to resize — constraints are kept.' },
-  line: { label: 'Line', icon: 'line', key: 'L', desc: 'Click points to draw connected lines. Click the first point to close the shape.' },
+  line: { label: 'Line', icon: 'line', key: 'L', desc: 'Click points to draw connected lines. Press A to switch the next segments to tangent arcs (and back). Click the first point to close the shape.' },
+  arc: { label: '3-point arc', short: 'Arc', icon: 'arc', key: 'A', desc: 'Click the start, then the end, then a point the arc passes through' },
   rect: { label: 'Rectangle', icon: 'rect', key: 'R', desc: 'Two-corner rectangle' },
   centerRect: { label: 'Center rect', icon: 'centerRect', key: 'Shift+R', desc: 'Rectangle drawn from its center' },
   circle: { label: 'Circle', icon: 'circle', key: 'C', desc: 'Center + diameter circle' },
-  polygon: { label: 'Polygon', icon: 'polygon', key: 'P', desc: 'Regular polygon (type a side count with Tab)' },
-  slot: { label: 'Slot', icon: 'slot', key: 'O', desc: 'Center-to-center slot: two centers, then the width' },
-  dimension: { label: 'Dimension', icon: 'dimension', key: 'D', desc: 'Click a line or circle, or two items (points, lines, circles) to add a driving dimension. Click empty space after one line for its length.' },
+  polygon: { label: 'Polygon', icon: 'polygon', desc: 'Regular polygon (type a side count with Tab)' },
+  slot: { label: 'Slot', icon: 'slot', desc: 'Center-to-center slot: two centers, then the width' },
+  fillet: { label: 'Sketch fillet', short: 'Fillet', icon: 'fillet', key: 'F', desc: 'Click a corner to round it. Type a number to change the radius.' },
+  trim: { label: 'Trim', icon: 'trim', key: 'T', desc: 'Click a piece of a curve to cut it back to the nearest crossings' },
+  extend: { label: 'Extend', icon: 'extend', key: 'E', desc: 'Click near the end of a line to stretch it to the next curve' },
+  offset: { label: 'Offset', icon: 'offset', key: 'O', desc: 'Click a curve or shape to add a parallel copy. Type the distance; hold Shift for the other side.' },
+  project: { label: 'Project', icon: 'project', key: 'P', desc: 'Click model edges to copy them into this sketch' },
+  dimension: { label: 'Dimension', icon: 'dimension', key: 'D', desc: 'Click a line, arc or circle, or two items (points, lines, circles) to add a driving dimension. Click empty space after one line for its length.' },
 };
+const MODIFY_TOOLS = new Set(['fillet', 'trim', 'extend', 'offset', 'project']);
 
 const KIND_WORDS = { point: 'a point', line: 'a line', circle: 'a circle' };
 
@@ -42,12 +53,15 @@ export class Sketcher {
     this.hoverEl = null;
     this.hoverCons = null;
     this.picks = [];
+    this.arcMode = false;
+    this.modText = { fillet: '2', offset: '2' };
     this.reset();
   }
 
   get active() { return this.app.mode === 'sketch'; }
   get ctx() { return this.app.activeSketchContext(); }
   get picking() { return this.tool === 'constraint' || this.tool === 'dimension'; }
+  get modifying() { return MODIFY_TOOLS.has(this.tool); }
 
   reset() {
     this.pts = [];
@@ -67,6 +81,9 @@ export class Sketcher {
   setTool(tool, ctype = null) {
     this.tool = tool;
     this.ctype = ctype;
+    if (tool !== 'line') this.arcMode = false;
+    this.modTarget = null;
+    this.vp.setHover(null);
     this.reset();
     if (tool !== 'select' && tool !== 'constraint') this.selected.clear();
     if (tool === 'constraint') this._applyToSelection();
@@ -98,11 +115,11 @@ export class Sketcher {
     const T = this.ctx.table;
     const cands = [];
     for (const [ref, el] of T) {
-      if (el.kind === 'point') cands.push({ p: el.p, kind: ref === 'origin' ? 'origin' : el.part === 'c' ? 'center' : 'end', ref });
+      if (el.kind === 'point') cands.push({ p: el.p, kind: ref === 'origin' ? 'origin' : el.part === 'c' || el.part.startsWith('ac') ? 'center' : 'end', ref });
       else if (el.kind === 'line' && !el.infinite) cands.push({ p: [(el.a[0] + el.b[0]) / 2, (el.a[1] + el.b[1]) / 2], kind: 'mid', lineRef: ref });
-      else if (el.kind === 'circle') for (const a of [0, 0.5, 1, 1.5]) cands.push({ p: [el.c[0] + el.r * Math.cos(a * Math.PI), el.c[1] + el.r * Math.sin(a * Math.PI)], kind: 'quad', curveRef: ref });
+      else if (el.kind === 'circle' && el.part === 'circ') for (const a of [0, 0.5, 1, 1.5]) cands.push({ p: [el.c[0] + el.r * Math.cos(a * Math.PI), el.c[1] + el.r * Math.sin(a * Math.PI)], kind: 'quad', curveRef: ref });
     }
-    if (this.tool === 'line' && this.pts.length >= 3) cands.push({ p: this.pts[0], kind: 'first' });
+    if (this.tool === 'line' && this.pts.length >= (this.arcMode ? 2 : 3)) cands.push({ p: this.pts[0], kind: 'first' });
     let best = null, bd = 11;
     for (const c of cands) {
       const s = this.screenOf(c.p);
@@ -117,7 +134,7 @@ export class Sketcher {
     if (this.snapGrid) { const st = this.snapStep(); p = [Math.round(p[0] / st) * st, Math.round(p[1] / st) * st]; kind = 'grid'; }
     const last = this.pts[this.pts.length - 1];
     const px = this.vp.pixelSize();
-    if (last && (this.tool === 'line' || (this.tool === 'slot' && this.pts.length === 1))) {
+    if (last && ((this.tool === 'line' && !this.arcMode) || ((this.tool === 'slot' || this.tool === 'arc') && this.pts.length === 1))) {
       if (Math.abs(raw[1] - last[1]) < px * 8) { p[1] = last[1]; this._hv = 'h'; this.guides.push([[last[0], last[1]], [p[0], p[1]]]); }
       else if (Math.abs(raw[0] - last[0]) < px * 8) { p[0] = last[0]; this._hv = 'v'; this.guides.push([[last[0], last[1]], [p[0], p[1]]]); }
     }
@@ -170,9 +187,17 @@ export class Sketcher {
     const c = this.cursor || [0, 0];
     const a = this.pts[0], b = this.pts[1];
     const T = this.tool, n = this.pts.length;
+    if (MODIFY_TOOLS.has(T)) {
+      if (T !== 'fillet' && T !== 'offset') return [];
+      const key = T === 'fillet' ? 'r' : 'd';
+      const p = prev.get(key);
+      const text = this.modText[T];
+      return [{ key, label: T === 'fillet' ? 'R' : 'D', unit: 'mm', live: this._evalField(text), locked: true, text, value: this._evalField(text), fresh: p ? p.fresh : true }];
+    }
     if (n === 0) return [mk('x', 'X', c[0]), mk('y', 'Y', c[1])];
     const last = this.pts[n - 1];
-    if (T === 'line') {
+    if (T === 'arc' && n === 2) return [];
+    if (T === 'line' || (T === 'arc' && n === 1)) {
       const L = Math.hypot(c[0] - last[0], c[1] - last[1]);
       const A = (Math.atan2(c[1] - last[1], c[0] - last[0]) * 180) / Math.PI;
       return [mk('len', 'L', L), mk('ang', '∠', A, '°')];
@@ -203,7 +228,7 @@ export class Sketcher {
     const n = this.pts.length, a = this.pts[0], last = this.pts[n - 1];
     const ok = (k) => f[k] && f[k].locked && Number.isFinite(f[k].value);
     if (n === 0) { if (ok('x')) c[0] = f.x.value; if (ok('y')) c[1] = f.y.value; return c; }
-    if (this.tool === 'line' || (this.tool === 'slot' && n === 1)) {
+    if (this.tool === 'line' || ((this.tool === 'slot' || this.tool === 'arc') && n === 1)) {
       const base = this.tool === 'line' ? last : a;
       let L = Math.hypot(c[0] - base[0], c[1] - base[1]);
       let A = Math.atan2(c[1] - base[1], c[0] - base[0]);
@@ -249,6 +274,17 @@ export class Sketcher {
       const ref = this._elementAt(e, kinds);
       if (ref !== this.hoverEl) { this.hoverEl = ref; this._renderPicks(); }
       this.vp.renderer.domElement.style.cursor = ref ? 'pointer' : 'crosshair';
+      return true;
+    }
+    if (this.modifying) {
+      const raw = this.local(e);
+      if (!raw) return true;
+      this.cursor = raw;
+      this._lastClient = [e.clientX, e.clientY];
+      this._lastEvent = e;
+      this.fields = this._defineFields();
+      this._modifyHover(e, raw);
+      this._renderHud();
       return true;
     }
     const raw = this.local(e);
@@ -298,7 +334,7 @@ export class Sketcher {
       return false;
     }
     if (click && e.button === 0) {
-      if (this.picking) this._pickClick(e); else this._place();
+      if (this.picking) this._pickClick(e); else if (this.modifying) this._modifyClick(e); else this._place();
       return true;
     }
     return false;
@@ -320,15 +356,20 @@ export class Sketcher {
     const drawing = this.tool !== 'select' && !this.picking && this.cursor;
     if (drawing && this.fields.length && (/^[0-9.]$/.test(k) || (k === '-' && !this.fields[this.activeField].text) || (/^[a-zA-Z_*/+()^ ]$/.test(k) && this.fields[this.activeField].locked))) {
       const f = this.fields[this.activeField];
-      f.text = (f.locked ? f.text : '') + k;
+      f.text = (f.locked && !f.fresh ? f.text : '') + k; // the first key replaces a preset value
+      f.fresh = false;
       f.locked = true;
       f.value = this._evalField(f.text);
-      this._renderPreview(); this._renderHud();
+      if (this.modifying) { this.modText[this.tool] = f.text; this._refreshModify(); this.app.emit('sketchTool'); } else this._renderPreview();
+      this._renderHud();
       return true;
     }
     if (drawing && k === 'Backspace' && this.fields.length) {
       const f = this.fields[this.activeField];
-      if (f.locked) { f.text = f.text.slice(0, -1); if (!f.text) f.locked = false; f.value = f.locked ? this._evalField(f.text) : f.live; this._renderPreview(); this._renderHud(); }
+      if (this.modifying) {
+        f.text = f.text.slice(0, -1); f.fresh = false; f.value = this._evalField(f.text);
+        this.modText[this.tool] = f.text; this._refreshModify(); this._renderHud();
+      } else if (f.locked) { f.text = f.text.slice(0, -1); if (!f.text) f.locked = false; f.value = f.locked ? this._evalField(f.text) : f.live; this._renderPreview(); this._renderHud(); }
       return true;
     }
     if (drawing && k === 'Tab' && this.fields.length) {
@@ -337,6 +378,7 @@ export class Sketcher {
       return true;
     }
     if (k === 'Enter' && this.tool === 'dimension' && this.picks.length === 1) { this._createDimension(this.picks); return true; }
+    if (k === 'Enter' && this.modifying) return true;
     if (k === 'Enter' && this.tool !== 'select' && !this.picking) {
       if (this.fields.some((f) => f.locked && f.key !== 'n') || (this.tool === 'polygon' && this.pts.length)) this._place();
       else if (this.tool === 'line') this._finishChain();
@@ -352,10 +394,20 @@ export class Sketcher {
     }
     if ((k === 'Delete' || k === 'Backspace') && (this.selected.size || this.selectedCons.size)) { this.deleteSelected(); return true; }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
-    const map = { l: 'line', r: 'rect', R: 'centerRect', c: 'circle', p: 'polygon', o: 'slot', d: 'dimension' };
+    if (k === 'a' || k === 'A') {
+      // in a line chain, A switches the next segments between straight and tangent arcs
+      if (this.tool === 'line' && this.pts.length) {
+        this.arcMode = !this.arcMode;
+        this.app.emit('sketchTool');
+        if (this._lastEvent) this.pointermove(this._lastEvent); else { this._renderPreview(); this._renderHud(); }
+        return true;
+      }
+      this.setTool('arc');
+      return true;
+    }
+    const map = { l: 'line', r: 'rect', R: 'centerRect', c: 'circle', d: 'dimension', f: 'fillet', t: 'trim', e: 'extend', o: 'offset', p: 'project' };
     if (map[k]) { this.setTool(map[k]); return true; }
     if (k === 'h') { this.setTool('constraint', 'hv'); return true; }
-    if (k === 't') { this.setTool('constraint', 'tangent'); return true; }
     if (k === 'x' || k === 'X') { this.toggleConstruction(); return true; }
     return false;
   }
@@ -460,13 +512,36 @@ export class Sketcher {
     if (T === 'line') {
       const last = this.pts[n - 1];
       if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 1e-9) return;
-      if (this.snapInfo?.kind === 'first' && !this.fields.some((f) => f.locked)) { this._finishChain(true); return; }
+      const bulge = this._chainBulge(p);
+      if (this.snapInfo?.kind === 'first' && !this.fields.some((f) => f.locked)) { this._closingBulge = bulge; this._closingTangent = this.arcMode && bulge !== 0; this._finishChain(true); return; }
       this.pts.push(p);
-      meta.seg = { len: this._typed('len'), ang: this._typed('ang') };
+      meta.seg = { len: bulge ? null : this._typed('len'), ang: bulge ? null : this._typed('ang') };
+      meta.bulge = bulge;
+      meta.tangentArc = this.arcMode && bulge !== 0;
+      if (bulge) meta.hv = null;
       this.meta.push(meta);
       this.fields = [];
       this.fields = this._defineFields();
       this._renderPreview(); this._renderHud();
+      return;
+    }
+    if (T === 'arc') {
+      if (n === 1) {
+        if (Math.hypot(p[0] - a[0], p[1] - a[1]) < 1e-9) return;
+        this.pts.push(p);
+        this.meta.push(meta);
+        this.fields = [];
+        this.fields = this._defineFields();
+        this._renderPreview(); this._renderHud();
+        return;
+      }
+      const b = this.pts[1];
+      const bulge = bulgeFromThreePoints(a, p, b);
+      if (Math.abs(bulge) < 1e-9) return;
+      const ent = { type: 'polyline', pts: [[num(a[0]), num(a[1])], [num(b[0]), num(b[1])]], bulges: [fmt(bulge, 9)], closed: false };
+      const cons = this._snapConstraints((i) => (i === 0 ? 'v0' : i === 1 ? 'v1' : null));
+      this._commit(ent, cons);
+      this.reset();
       return;
     }
     let ent = null, cons = [];
@@ -528,20 +603,42 @@ export class Sketcher {
     this.reset();
   }
 
+  /** Bulge for the next chain segment: a tangent arc in arc mode, otherwise straight. */
+  _chainBulge(p, quiet = false) {
+    const n = this.pts.length;
+    if (!this.arcMode || n < 1) return 0;
+    if (n < 2) { if (!quiet && !this._arcHinted) { toast('Tangent arcs continue from the previous segment — draw a line first', 'info', 2600); this._arcHinted = true; } return 0; }
+    const prev = { k: 'A', a: this.pts[n - 2], b: this.pts[n - 1], bulge: this.meta[n - 1].bulge || 0 };
+    return tangentBulge(this.pts[n - 1], endTangent(prev), p);
+  }
+
   _finishChain(closed = false) {
     if (this.tool !== 'line') return;
     const pts = this.pts;
     if (pts.length < 2) { this.reset(); return; }
-    const isLine = pts.length === 2 && !closed;
+    // bulge of segment i (pts[i] → pts[i+1]); the closing segment (closed chains) is last
+    const bulges = this.meta.slice(1).map((m) => m.bulge || 0);
+    if (closed) bulges.push(this._closingBulge || 0);
+    const isLine = pts.length === 2 && !closed && !bulges[0];
     const partOf = (i) => (isLine ? (i === 0 ? 'p1' : 'p2') : `v${i}`);
-    const segOf = (i) => (isLine ? 'seg' : `s${i}`);
+    const segRef = (i) => (isLine ? 'seg' : `${bulges[i] ? 'a' : 's'}${i}`);
     const cons = this._snapConstraints(partOf);
     const locked = [];
     if (this.meta[0].typed.x) locked.push(isLine ? 'x1' : 'pts.0.0');
     if (this.meta[0].typed.y) locked.push(isLine ? 'y1' : 'pts.0.1');
+    const tangentTo = (i) => {
+      // segment i is a tangent arc: keep it tangent to the segment before it
+      const j = i - 1;
+      if (j < 0) return;
+      const t = { type: 'tangent', refs: [`@:${segRef(j)}`, `@:${segRef(i)}`] };
+      if (bulges[j]) t.mode = Math.sign(bulges[j]) === Math.sign(bulges[i]) ? 'int' : 'ext';
+      cons.push(t);
+    };
     this.meta.forEach((m, i) => {
       if (i === 0) return;
-      const seg = `@:${segOf(i - 1)}`;
+      const seg = `@:${segRef(i - 1)}`;
+      if (m.tangentArc) tangentTo(i - 1);
+      if (bulges[i - 1]) return;
       if (m.hv) cons.push({ type: m.hv === 'h' ? 'horizontal' : 'vertical', refs: [seg] });
       if (m.seg && m.seg.len) cons.push({ type: 'length', refs: [seg], value: m.seg.len });
       if (m.seg && m.seg.ang && !m.hv) {
@@ -550,12 +647,203 @@ export class Sketcher {
         if (Math.abs(raw) > 1e-6) cons.push({ type: 'angle', refs: [seg, 'xaxis'], value: String(Math.abs(this._evalField(m.seg.ang))), sgn: Math.sign(raw) });
       }
     });
+    if (closed && this._closingTangent) tangentTo(pts.length - 1);
     const ent = isLine
       ? { type: 'line', x1: num(pts[0][0]), y1: num(pts[0][1]), x2: num(pts[1][0]), y2: num(pts[1][1]) }
-      : { type: 'polyline', pts: pts.map(([x, y]) => [num(x), num(y)]), closed };
+      : { type: 'polyline', pts: pts.map(([x, y]) => [num(x), num(y)]), bulges: bulges.map((b) => (b ? fmt(b, 9) : '0')), closed };
     if (locked.length) ent.locked = locked;
+    this._closingBulge = 0;
+    this._closingTangent = false;
     this._commit(ent, cons);
     this.reset();
+  }
+
+  // ------------------------------------------------------------ modify tools: fillet, trim, extend, offset, project
+  stored(id) { return this.app.activeSketch().entities.find((x) => x.id === id); }
+  _modValue() { const v = this._evalField(this.modText[this.tool]); return Number.isFinite(v) ? v : NaN; }
+
+  _refreshModify() {
+    if (this._lastEvent && this.cursor) this._modifyHover(this._lastEvent, this.cursor);
+  }
+
+  _modifyHover(e, raw) {
+    const ctx = this.ctx, T = this.tool;
+    const items = [], points = [];
+    this.modTarget = null;
+    if (T === 'project') {
+      const hit = this.vp.pick(e.clientX, e.clientY, 'edges');
+      this.vp.setHover(hit && hit.kind === 'edge' ? hit : null);
+      this.modTarget = hit && hit.kind === 'edge' ? hit : null;
+      this.vp.renderer.domElement.style.cursor = this.modTarget ? 'pointer' : 'crosshair';
+      this.vp.setPreview(ctx.frame, []);
+      return;
+    }
+    if (T === 'fillet') {
+      const c = this._findCorner(raw, this._modValue());
+      this.modTarget = c;
+      if (c && c.res && !c.res.error) items.push({ pts: primsOutline([{ k: 'A', a: c.res.t1, b: c.res.t2, bulge: c.res.bulge }], false), color: PICK });
+      if (c) points.push({ p: c.V, color: c.res && c.res.error ? '#ef5350' : PICK, size: 10 });
+    } else {
+      const id = this._entityAt(e);
+      const ent = id && ctx.ents.find((x) => x.id === id);
+      if (ent && !ent.error) {
+        if (T === 'trim') {
+          const r = trimEntity(ent, ctx.ents, raw);
+          if (r) { this.modTarget = { ent, r }; for (const p of r.removed) items.push({ pts: primsOutline([p], false), color: '#ef5350' }); }
+        } else if (T === 'extend') {
+          const r = extendEntity(ent, this.stored(id), ctx.ents, raw);
+          if (r) { this.modTarget = { ent, r }; items.push({ pts: [r.from, r.to], color: '#3fb950', dashed: true }); }
+        } else if (T === 'offset') {
+          const d = this._modValue() * (e.shiftKey ? -1 : 1);
+          const off = Number.isFinite(d) ? offsetEntity(ent, d) : null;
+          if (off) {
+            this.modTarget = { ent, off };
+            const ev = evalEntity(off, this.app.scope);
+            items.push({ pts: outline(ev), closed: !isOpenOutline(ev), color: '#4f8cff', dashed: true });
+          }
+        }
+      }
+    }
+    this.vp.renderer.domElement.style.cursor = this.modTarget ? 'pointer' : 'crosshair';
+    this.vp.setPreview(ctx.frame, items, points);
+  }
+
+  _modifyClick(e) {
+    const raw = this.local(e);
+    if (raw) this._modifyHover(e, raw);
+    const t = this.modTarget;
+    if (!t) {
+      const hints = { fillet: 'Click near a corner between two straight segments', trim: 'Click the piece of a curve you want to remove', extend: 'Click near the end of a line that points at another curve', offset: 'Click a curve or shape to offset', project: 'Click an edge of the model' };
+      toast(hints[this.tool], 'info', 2000);
+      return;
+    }
+    const T = this.tool;
+    if (T === 'fillet') this._applyFillet(t, this._modValue());
+    else if (T === 'trim') this._applyTrim(t);
+    else if (T === 'extend') this.app.updateSketchEntities([t.ent.id], (x) => ({ ...x, ...t.r.patch }), 'Extend');
+    else if (T === 'offset') {
+      const off = { ...t.off };
+      if (t.ent.construction || this.construction) off.construction = true;
+      this._commit(off, []);
+    } else if (T === 'project') this._applyProject(t);
+    this.modTarget = null;
+    this.vp.setPreview(this.ctx.frame, []);
+    if (this._lastEvent) setTimeout(() => this._refreshModify(), 0);
+  }
+
+  /** Nearest roundable corner: polyline vertices, rectangle/polygon corners, or two lines that meet. */
+  _findCorner(raw, r) {
+    const ctx = this.ctx;
+    const tol = 14 * this.vp.pixelSize();
+    let best = null;
+    const consider = (c) => { const d = Math.hypot(raw[0] - c.V[0], raw[1] - c.V[1]); if (d < tol && (!best || d < best.d)) best = { ...c, d }; };
+    const lines = [];
+    for (const e of ctx.ents) {
+      if (e.error) continue;
+      if (e.type === 'polyline') {
+        const n = e.pts.length;
+        for (let k = 0; k < n; k++) {
+          if (!e.closed && (k === 0 || k === n - 1)) continue;
+          const prevSeg = k === 0 ? n - 1 : k - 1;
+          if ((e.bulges[prevSeg] || 0) !== 0 || (e.bulges[k] || 0) !== 0) continue;
+          consider({ kind: 'poly', ent: e, k, P: e.pts[(k - 1 + n) % n], V: e.pts[k], N: e.pts[(k + 1) % n] });
+        }
+      } else if (e.type === 'rect' || e.type === 'polygon') {
+        const v = primsOf(e).prims.map((p) => p.a), n = v.length;
+        v.forEach((V, k) => consider({ kind: 'convert', ent: e, k, P: v[(k - 1 + n) % n], V, N: v[(k + 1) % n] }));
+      } else if (e.type === 'line') lines.push(e);
+    }
+    const ends = (l) => [['p1', [l.x1, l.y1], [l.x2, l.y2]], ['p2', [l.x2, l.y2], [l.x1, l.y1]]];
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
+      for (const [e1, V1, O1] of ends(lines[i])) for (const [e2, V2, O2] of ends(lines[j])) {
+        if (Math.hypot(V1[0] - V2[0], V1[1] - V2[1]) < 1e-6) consider({ kind: 'lines', l1: lines[i], end1: e1, l2: lines[j], end2: e2, P: O1, V: V1, N: O2 });
+      }
+    }
+    if (best) best.res = Number.isFinite(r) && r > 0 ? filletCorner(best.P, best.V, best.N, r) : { error: 'Type a radius greater than zero' };
+    return best;
+  }
+
+  _applyFillet(c, r) {
+    if (!c.res || c.res.error) { toast(c.res ? c.res.error : 'No corner here', 'warn', 2400); return; }
+    const app = this.app;
+    const rText = this.modText.fillet;
+    const P2 = (p) => [num(p[0]), num(p[1])];
+    if (c.kind === 'lines') {
+      const arcId = newId('e');
+      const { t1, t2, bulge } = c.res;
+      app.commitSketch('Sketch fillet', (d) => {
+        d.entities = d.entities.map((x) => {
+          if (x.id === c.l1.id) return { ...x, ...(c.end1 === 'p1' ? { x1: P2(t1)[0], y1: P2(t1)[1] } : { x2: P2(t1)[0], y2: P2(t1)[1] }) };
+          if (x.id === c.l2.id) return { ...x, ...(c.end2 === 'p1' ? { x1: P2(t2)[0], y1: P2(t2)[1] } : { x2: P2(t2)[0], y2: P2(t2)[1] }) };
+          return x;
+        });
+        d.entities.push({ id: arcId, type: 'polyline', pts: [P2(t1), P2(t2)], bulges: [fmt(bulge, 9)], closed: false });
+        const r1 = `${c.l1.id}:${c.end1}`, r2 = `${c.l2.id}:${c.end2}`;
+        d.constraints = d.constraints.filter((k) => !(k.type === 'coincident' && k.refs.includes(r1) && k.refs.includes(r2)));
+        d.constraints.push(
+          { type: 'coincident', refs: [`${arcId}:v0`, r1] }, { type: 'coincident', refs: [`${arcId}:v1`, r2] },
+          { type: 'tangent', refs: [`${c.l1.id}:seg`, `${arcId}:a0`] }, { type: 'tangent', refs: [`${c.l2.id}:seg`, `${arcId}:a0`] },
+          { type: 'radius', refs: [`${arcId}:a0`], value: rText });
+      });
+      return;
+    }
+    app.commitSketch('Sketch fillet', (d) => {
+      const idx = d.entities.findIndex((x) => x.id === c.ent.id);
+      let s = d.entities[idx];
+      if (c.kind === 'convert') {
+        const conv = toPolyline(s, c.ent);
+        s = conv.ent;
+        d.constraints = remapConstraints(d.constraints, s.id, conv.remap).concat(conv.cons);
+      }
+      const f = filletPolyline(s, c.k, c.res);
+      d.entities[idx] = f.ent;
+      d.constraints = remapConstraints(d.constraints, s.id, f.remap).concat(
+        { type: 'tangent', refs: [`${s.id}:${f.prevSeg}`, `${s.id}:${f.arc}`] },
+        { type: 'tangent', refs: [`${s.id}:${f.nextSeg}`, `${s.id}:${f.arc}`] },
+        { type: 'radius', refs: [`${s.id}:${f.arc}`], value: rText });
+    });
+  }
+
+  _applyTrim(t) {
+    const pieces = t.r.pieces.filter(Boolean).map((p) => ({ ...p, id: newId('e') }));
+    const id = t.ent.id;
+    const dropped = (this.app.activeSketch().constraints || []).filter((c) => c.refs.some((r) => r.startsWith(`${id}:`))).length;
+    this.app.commitSketch('Trim', (d) => {
+      const i = d.entities.findIndex((x) => x.id === id);
+      d.entities.splice(i, 1, ...pieces);
+      d.constraints = d.constraints.filter((c) => !c.refs.some((r) => r.startsWith(`${id}:`)));
+    });
+    if (dropped) toast(`Removed ${dropped} constraint${dropped > 1 ? 's' : ''} on the trimmed curve`, 'info', 2200);
+  }
+
+  _applyProject(hit) {
+    const frame = this.ctx.frame;
+    const entry = this.vp.bodies.get(hit.bodyId);
+    const info = hit.info, P = entry.data.edgePts;
+    const local = [];
+    for (let i = 0; i < info.count; i++) { const k = (info.start + i) * 3; local.push(toLocal(frame, this.vp.toWorldOf(hit.bodyId, [P[k], P[k + 1], P[k + 2]]))); }
+    const first = local[0], last = local[local.length - 1];
+    const closedEdge = Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6;
+    let ent = null;
+    if (info.type === 'LINE') ent = { type: 'line', x1: num(first[0]), y1: num(first[1]), x2: num(last[0]), y2: num(last[1]) };
+    else if (info.type === 'CIRCLE') {
+      const circ = this.vp.circleOf(entry, hit.index);
+      const axis = circ && this.vp.toWorldOf(hit.bodyId, circ.axis, true);
+      const flat = axis && Math.abs(axis[0] * frame.normal[0] + axis[1] * frame.normal[1] + axis[2] * frame.normal[2]) > 0.999;
+      if (flat && closedEdge) {
+        const c = toLocal(frame, this.vp.toWorldOf(hit.bodyId, circ.c));
+        ent = { type: 'circle', cx: num(c[0]), cy: num(c[1]), d: num(2 * circ.r) };
+      } else if (flat) {
+        const mid = local[Math.floor(local.length / 2)];
+        ent = { type: 'polyline', pts: [[num(first[0]), num(first[1])], [num(last[0]), num(last[1])]], bulges: [fmt(bulgeFromThreePoints(first, mid, last), 9)], closed: false };
+      }
+    }
+    if (!ent) {
+      const pts = (closedEdge ? local.slice(0, -1) : local).map(([x, y]) => [num(x), num(y)]);
+      if (pts.length < 2) return;
+      ent = { type: 'polyline', pts, bulges: pts.map(() => '0').slice(0, closedEdge ? pts.length : pts.length - 1), closed: closedEdge };
+    }
+    this._commit(ent, []);
   }
 
   // ------------------------------------------------------------ constraint + dimension tools
@@ -631,7 +919,10 @@ export class Sketcher {
       const [el] = els, [ref] = refs;
       const ent = this.ctx.ents.find((x) => x.id === el.ent);
       if (!ent) return;
-      if (el.kind === 'circle') return lockField(ent.id, ent.type === 'circle' ? 'd' : 'w');
+      if (el.kind === 'circle') {
+        if (ent.type === 'polyline') return addCons('radius', [ref]);
+        return lockField(ent.id, ent.type === 'circle' ? 'd' : 'w');
+      }
       if (el.kind === 'line') {
         if (ent.type === 'rect') return lockField(ent.id, el.part === 'e0' || el.part === 'e2' ? 'w' : 'h');
         if (ent.type === 'slot') return addCons('distance', [`${ent.id}:p1`, `${ent.id}:p2`]);
@@ -745,7 +1036,21 @@ export class Sketcher {
     const n = this.pts.length;
     if (c && n) {
       const a = this.pts[0];
-      if (T === 'line') items.push({ pts: [...this.pts, c], color: col });
+      if (T === 'line') {
+        const prims = [];
+        for (let i = 1; i < n; i++) prims.push({ k: this.meta[i].bulge ? 'A' : 'L', a: this.pts[i - 1], b: this.pts[i], bulge: this.meta[i].bulge || 0 });
+        const live = this._chainBulge(c, true);
+        if (Math.hypot(c[0] - this.pts[n - 1][0], c[1] - this.pts[n - 1][1]) > 1e-9) prims.push({ k: live ? 'A' : 'L', a: this.pts[n - 1], b: c, bulge: live });
+        if (prims.length) items.push({ pts: primsOutline(prims, false), color: col });
+      }
+      if (T === 'arc') {
+        if (n === 1) items.push({ pts: [a, c], color: col, dashed: true });
+        else {
+          const b = this.pts[1];
+          const bu = bulgeFromThreePoints(a, c, b);
+          items.push({ pts: Math.abs(bu) > 1e-9 ? primsOutline([{ k: 'A', a, b, bulge: bu }], false) : [a, b], color: col });
+        }
+      }
       if (T === 'rect') items.push({ pts: [[a[0], a[1]], [c[0], a[1]], [c[0], c[1]], [a[0], c[1]]], closed: true, color: col });
       if (T === 'centerRect') { const dx = c[0] - a[0], dy = c[1] - a[1]; items.push({ pts: [[a[0] - dx, a[1] - dy], [a[0] + dx, a[1] - dy], [a[0] + dx, a[1] + dy], [a[0] - dx, a[1] + dy]], closed: true, color: col }); }
       if (T === 'circle') items.push({ pts: outline({ type: 'circle', cx: a[0], cy: a[1], d: 2 * Math.hypot(c[0] - a[0], c[1] - a[1]) }), closed: true, color: col }, { pts: [a, c], color: col, dashed: true, opacity: 0.6 });
@@ -772,12 +1077,13 @@ export class Sketcher {
 
   _renderHud() {
     const el = this.hudEl;
-    if (!this.active || this.tool === 'select' || this.picking || !this.cursor || !this._lastClient) { el.classList.add('hidden'); return; }
+    const arcBadge = this.tool === 'line' && this.arcMode;
+    if (!this.active || this.tool === 'select' || this.picking || !this.cursor || !this._lastClient || (!this.fields.length && !arcBadge)) { el.classList.add('hidden'); return; }
     el.classList.remove('hidden');
     const wrap = el.parentElement.getBoundingClientRect();
     el.style.left = `${this._lastClient[0] - wrap.left}px`;
     el.style.top = `${this._lastClient[1] - wrap.top}px`;
-    el.innerHTML = this.fields.map((f, i) => {
+    el.innerHTML = (arcBadge ? '<div class="hud-field locked"><b>Arc</b>tangent · A</div>' : '') + this.fields.map((f, i) => {
       const val = f.locked ? (f.text || '') : fmt(f.value, 2);
       const unit = f.unit === '°' ? '°' : '';
       return `<div class="hud-field${i === this.activeField ? ' active' : ''}${f.locked ? ' locked' : ''}"><b>${f.label}</b>${escapeHtml(val)}${unit}</div>`;
@@ -786,6 +1092,85 @@ export class Sketcher {
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+/**
+ * Rectangle / polygon → closed polyline (same id) so its corners can be rounded or trimmed.
+ * Keeps the shape's intent as constraints (H/V sides, driving width/height, equal polygon sides).
+ */
+function toPolyline(s, e) {
+  const prims = primsOf(e).prims;
+  const pts = prims.map((p) => [num(p.a[0]), num(p.a[1])]);
+  const ent = { id: s.id, type: 'polyline', pts, bulges: pts.map(() => '0'), closed: true };
+  if (s.construction) ent.construction = true;
+  if (s.fixed) ent.fixed = true;
+  const remap = (part) => (/^v\d+$/.test(part) || /^s\d+$/.test(part) ? part : /^e\d+$/.test(part) ? `s${part.slice(1)}` : null);
+  const cons = [];
+  if (s.type === 'rect') {
+    cons.push({ type: 'horizontal', refs: [`${s.id}:s0`] }, { type: 'vertical', refs: [`${s.id}:s1`] }, { type: 'horizontal', refs: [`${s.id}:s2`] }, { type: 'vertical', refs: [`${s.id}:s3`] });
+    const locked = new Set(s.locked || []);
+    const drives = (k) => locked.has(k) || !isLiteral(s[k]);
+    const abs = (v) => (isLiteral(v) ? num(Math.abs(parseFloat(v))) : `abs(${v})`);
+    if (drives('w')) cons.push({ type: 'length', refs: [`${s.id}:s0`], value: abs(s.w) });
+    if (drives('h')) cons.push({ type: 'length', refs: [`${s.id}:s1`], value: abs(s.h) });
+  } else if (s.type === 'polygon') {
+    for (let i = 1; i < pts.length; i++) cons.push({ type: 'equal', refs: [`${s.id}:s0`, `${s.id}:s${i}`] });
+  }
+  return { ent, remap, cons };
+}
+
+/** Replace polyline vertex k by a tangent fillet arc (res from filletCorner). */
+function filletPolyline(s, k, res) {
+  const n = s.pts.length, closed = !!s.closed;
+  const segs = closed ? n : n - 1;
+  const bulges = Array.from({ length: segs }, (_, i) => (s.bulges && s.bulges[i] != null ? s.bulges[i] : '0'));
+  const T1 = [num(res.t1[0]), num(res.t1[1])], T2 = [num(res.t2[0]), num(res.t2[1])];
+  const ab = fmt(res.bulge, 9);
+  let pts, nb, remap, lockMap, prevSeg, nextSeg, arc;
+  if (closed && k === 0) {
+    pts = [T2, ...s.pts.slice(1), T1];
+    nb = [...bulges, ab];
+    remap = (part) => (part === 'v0' ? null : part);
+    lockMap = (key) => (/^pts\.0\./.test(key) ? null : key);
+    prevSeg = `s${n - 1}`; nextSeg = 's0'; arc = `a${n}`;
+  } else {
+    pts = [...s.pts.slice(0, k), T1, T2, ...s.pts.slice(k + 1)];
+    nb = [...bulges.slice(0, k), ab, ...bulges.slice(k)];
+    remap = (part) => {
+      const m = /^(v|s|a|ac)(\d+)$/.exec(part);
+      if (!m) return part;
+      const j = +m[2];
+      if (m[1] === 'v') return j < k ? part : j === k ? null : `v${j + 1}`;
+      return j < k ? part : `${m[1]}${j + 1}`;
+    };
+    lockMap = (key) => {
+      const m = /^(pts|bulges)\.(\d+)(\..*)?$/.exec(key);
+      if (!m) return key;
+      const j = +m[2];
+      if (m[1] === 'pts') return j < k ? key : j === k ? null : `pts.${j + 1}${m[3]}`;
+      return j < k ? key : `bulges.${j + 1}`;
+    };
+    prevSeg = `s${k - 1}`; nextSeg = `s${k + 1}`; arc = `a${k}`;
+  }
+  const ent = { ...s, pts, bulges: nb };
+  if (s.locked) { ent.locked = s.locked.map(lockMap).filter(Boolean); if (!ent.locked.length) delete ent.locked; }
+  return { ent, remap, prevSeg, nextSeg, arc };
+}
+
+/** Rewrite (or drop) constraint references after an entity's vertices were renumbered. */
+function remapConstraints(list, entId, remap) {
+  const out = [];
+  for (const c of list) {
+    let ok = true;
+    const refs = c.refs.map((r) => {
+      if (!r.startsWith(`${entId}:`)) return r;
+      const np = remap(r.slice(entId.length + 1));
+      if (!np) { ok = false; return r; }
+      return `${entId}:${np}`;
+    });
+    if (ok) out.push({ ...c, refs });
+  }
+  return out;
+}
 
 const POS_FIELDS = { line: [['x1', 'y1'], ['x2', 'y2']], rect: [['x', 'y']], circle: [['cx', 'cy']], polygon: [['cx', 'cy']], slot: [['x1', 'y1'], ['x2', 'y2']], arc: [['cx', 'cy']] };
 

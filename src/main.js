@@ -288,6 +288,13 @@ function statusHint() {
   if (app.mode === 'sketch') {
     const t = app.sketcher.tool;
     if (t === 'constraint') return 'Click the geometry to constrain · glyphs show existing constraints (right-click one to delete) · <kbd>Esc</kbd> to stop';
+    if (t === 'fillet') return 'Click a corner to round it · type a number to change the radius · <kbd>Esc</kbd> to stop';
+    if (t === 'trim') return 'Click the piece to remove (shown in red) · <kbd>Esc</kbd> to stop';
+    if (t === 'extend') return 'Click near the end of a line to stretch it to the next curve · <kbd>Esc</kbd> to stop';
+    if (t === 'offset') return 'Click a curve or shape to copy it parallel · type the distance · <kbd>Shift</kbd> for the other side';
+    if (t === 'project') return 'Click model edges to copy them into the sketch · <kbd>Esc</kbd> to stop';
+    if (t === 'arc') return 'Click the start, the end, then a point on the arc · <kbd>Esc</kbd> to stop';
+    if (t === 'line') return 'Click to place points · <kbd>A</kbd> tangent arcs on/off · type numbers for exact dimensions · <kbd>Esc</kbd> stop';
     if (t === 'dimension') return 'Click a line or circle, or two items, then type the value · right-click a dimension to remove it · <kbd>Esc</kbd> to stop';
     if (t === 'select') return 'Click to select · drag points to reshape (constraints are kept) · <kbd>D</kbd> dimension · <kbd>H</kbd> horiz/vert · <kbd>Del</kbd> deletes';
     return 'Click to place points · type numbers for exact dimensions · <kbd>Tab</kbd> next field · <kbd>Esc</kbd> stop';

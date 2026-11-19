@@ -3,7 +3,8 @@
 import opencascade from 'https://cdn.jsdelivr.net/npm/replicad-opencascadejs@1.1.0/dist/replicad_single.js';
 import * as R from 'https://cdn.jsdelivr.net/npm/replicad@1.1.0/+esm';
 import { evaluate, evaluateParams } from '../model/expr.js';
-import { evalEntity, computeRegions, cleanPts, polygonVerts, slotFrame } from '../model/profiles.js';
+import { evalEntity, computeRegions, polygonVerts, slotFrame } from '../model/profiles.js';
+import { primsOf, arcMid } from '../model/sketchgeom.js';
 import { planeFrame, scale, dist, norm, cross, dot } from '../model/geom.js';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/replicad-opencascadejs@1.1.0/dist/replicad_single.wasm';
@@ -80,12 +81,24 @@ function polyDrawing(pts) {
   return pen.close();
 }
 
+/** Closed path of lines and bulge arcs → replicad drawing. */
+function primsDrawing(prims) {
+  if (!prims.length) throw new Error('Empty profile');
+  let pen = R.draw(prims[0].a);
+  for (const p of prims) pen = p.k === 'A' ? pen.threePointsArcTo(p.b, arcMid(p.a, p.b, p.bulge)) : pen.lineTo(p.b);
+  return pen.close();
+}
+
+function srcDrawing(src) {
+  return src.type === 'loop' ? primsDrawing(src.prims) : entityDrawing(src.ent);
+}
+
 function entityDrawing(e) {
+  if (e.type === 'polyline') return primsDrawing(primsOf(e).prims);
   switch (e.type) {
     case 'rect': return R.drawRectangle(Math.abs(e.w), Math.abs(e.h)).translate(e.x + e.w / 2, e.y + e.h / 2);
     case 'circle': return R.drawCircle(e.d / 2).translate(e.cx, e.cy);
     case 'polygon': return polyDrawing(polygonVerts(e));
-    case 'polyline': return polyDrawing(cleanPts(e.pts));
     case 'slot': {
       const { ux, uy, px, py, r } = slotFrame(e);
       const A = [e.x1 + px * r, e.y1 + py * r], B = [e.x2 + px * r, e.y2 + py * r];
@@ -107,13 +120,12 @@ function sketchContext(sketch, scope) {
 }
 
 function profileDrawing(ctx, profileIds) {
-  const byId = new Map(ctx.ents.map((e) => [e.id, e]));
   const chosen = ctx.regions.filter((r) => profileIds.includes(r.id));
   if (!chosen.length) throw new Error('Select at least one profile');
   let drawing = null;
   for (const r of chosen) {
-    let d = entityDrawing(r.ent);
-    for (const c of r.children) d = d.cut(entityDrawing(byId.get(c)));
+    let d = srcDrawing(r.src);
+    for (const cs of r.childSrcs) d = d.cut(srcDrawing(cs));
     drawing = drawing ? drawing.fuse(d) : d;
   }
   return drawing;
